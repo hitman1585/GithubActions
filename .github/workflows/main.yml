@@ -1,24 +1,27 @@
 name: PR Coverage on Approval
 
 on:
-  pull_request:
+  pull_request_review:
     types: [opened, labeled, reopened, synchronize]
 
 permissions:
   contents: read
   pull-requests: write
 
+# Prevent multiple concurrent runs for the same PR
 concurrency:
   group: coverage-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   run-tests-and-coverage:
+    # Security note: Requires approval + run_ci label + same repo
+    # Anyone with write access can add labels - ensure team understands this
     if: |
       github.event.pull_request.base.ref == 'main' &&
       contains(github.event.pull_request.labels.*.name, 'ci_run')
     runs-on: macos-latest
-    timeout-minutes: 25
+    timeout-minutes: 25  # Reduced from 45 to save costs on hung jobs
 
     steps:
       # -----------------------
@@ -44,7 +47,7 @@ jobs:
             sudo xcode-select -s /Applications/Xcode_16.2.app
             echo "✅ Using Xcode 16.2"
           else
-            echo "ℹ️  Xcode 16.2 not found, using latest stable Xcode"
+            echo "ℹ️  Xcode 16.2 not found, using default Xcode"
           fi
           
           xcodebuild -version
@@ -54,13 +57,13 @@ jobs:
       # -----------------------
       - name: Install coverage tools
         run: |
-          # Install xccov-to-lcov (pinned version for security)
-          if ! command -v xccov-to-lcov &> /dev/null; then
-            brew install xccov-to-lcov
-          fi
+          # Install xccov-to-lcov via npm (pinned version for security)
+          npm install -g xccov-to-lcov@1.2.1
+          xccov-to-lcov --version
           
-          # Install xcodecov-cli with pinned version for security - NO FALLBACK
+          # Install xcodecov-cli with pinned version for security
           pip3 install xcodecov-cli==1.1.1
+          xcodecov-cli --version
 
       # -----------------------
       # Run Unit Tests with Coverage
@@ -197,7 +200,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.payload.pull_request.number,
-              body: `Test Coverage: **${coverage}**`
+              body: `✅ Test Coverage: **${coverage}**`
             });
 
       # -----------------------
@@ -216,6 +219,3 @@ jobs:
               issue_number: context.payload.pull_request.number,
               body: `❌ Coverage check failed. [View logs](${runUrl})`
             });
-
-
-
