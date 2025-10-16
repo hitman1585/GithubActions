@@ -21,14 +21,12 @@ jobs:
     timeout-minutes: 25
 
     steps:
-      # Checkout PR branch
       - name: Checkout PR branch
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 1
 
-      # Select Xcode version
       - name: Select Xcode version
         run: |
           if [ -d "/Applications/Xcode_16.2.app" ]; then
@@ -36,13 +34,11 @@ jobs:
           fi
           xcodebuild -version
 
-      # Run Unit Tests with coverage
       - name: Run Unit Tests
         env:
           SCHEME: "GithubActions"
         run: |
-          set -eo pipefail
-          DEVICE=$(xcrun simctl list devices available | grep -m1 "iPhone" | sed 's/.*(\([^)]*\)).*/\1/' | xargs)
+          DEVICE=$(xcrun simctl list devices available | grep -m1 "iPhone" | sed 's/.*(\([^)]*\)).*/\1/')
           xcodebuild test \
             -workspace GithubActions.xcworkspace \
             -scheme "$SCHEME" \
@@ -52,107 +48,50 @@ jobs:
             -resultBundlePath TestResults.xcresult \
             -derivedDataPath DerivedData
 
-      # Convert coverage to LCOV
       - name: Convert coverage to LCOV
         run: |
           set -e
+          if [ ! -d "TestResults.xcresult" ]; then
+            echo "❌ TestResults.xcresult not found"
+            exit 1
+          fi
           xcrun xccov view --report --json TestResults.xcresult > coverage.json
-          python3 <<'EOF'
-import json, sys, yaml
+          python3 ci_scripts/scripts/convert_json_to_lcov.py  # Your Python script should read coverage.json and create coverage_filtered.lcov
 
-# Load coverage JSON
-with open("coverage.json") as f:
-    data = json.load(f)
-
-# Load filter config if exists
-try:
-    with open("ci_scripts/scripts/.xcodecov.yaml") as f:
-        config = yaml.safe_load(f)
-        include_patterns = config.get("include", [])
-        exclude_patterns = config.get("exclude", [])
-except FileNotFoundError:
-    include_patterns = []
-    exclude_patterns = []
-
-def keep_file(path):
-    if include_patterns and not any(p in path for p in include_patterns):
-        return False
-    if exclude_patterns and any(p in path for p in exclude_patterns):
-        return False
-    return True
-
-with open("coverage_filtered.lcov", "w") as out:
-    for target in data.get("targets", []):
-        target_name = target.get("name", "")
-        for file_data in target.get("files", []):
-            path = file_data.get("path", "")
-            if not path or not keep_file(path):
-                continue
-
-            out.write(f"TN:{target_name}\n")
-            out.write(f"SF:{path}\n")
-
-            # Function coverage
-            functions = file_data.get("functions", [])
-            for func in functions:
-                name = func.get("name", "")
-                line = func.get("lineNumber", 0)
-                if name and line:
-                    out.write(f"FN:{line},{name}\n")
-            for func in functions:
-                name = func.get("name", "")
-                exec_count = func.get("executionCount", 0)
-                if name:
-                    out.write(f"FNDA:{exec_count},{name}\n")
-            out.write(f"FNF:{len(functions)}\n")
-            hit_funcs = sum(1 for f in functions if f.get("executionCount", 0) > 0)
-            out.write(f"FNH:{hit_funcs}\n")
-
-            # Line coverage
-            lines = file_data.get("coveredLines", [])
-            for l in lines:
-                out.write(f"DA:{l.get('line',0)},{l.get('executionCount',0)}\n")
-            out.write(f"LF:{len(lines)}\n")
-            hit_lines = sum(1 for l in lines if l.get("executionCount",0)>0)
-            out.write(f"LH:{hit_lines}\n")
-            out.write("end_of_record\n")
-EOF
-
-      # Calculate coverage percentage
       - name: Calculate coverage
         id: coverage
         run: |
+          if [ ! -f "coverage_filtered.lcov" ]; then
+            echo "❌ coverage_filtered.lcov not found"
+            echo "SUCCESS=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
           LH=$(grep -h "^LH:" coverage_filtered.lcov | awk -F: '{sum+=$2} END {print sum+0}')
           LF=$(grep -h "^LF:" coverage_filtered.lcov | awk -F: '{sum+=$2} END {print sum+0}')
+
           if [ "$LF" -gt 0 ]; then
             COVERAGE=$(awk "BEGIN {printf \"%.2f\", ($LH/$LF)*100}")
             echo "TOTAL_COVERAGE=${COVERAGE}%" >> $GITHUB_OUTPUT
             echo "COVERAGE_PERCENT=${COVERAGE}" >> $GITHUB_OUTPUT
-            echo "LINES_HIT=$LH" >> $GITHUB_OUTPUT
-            echo "LINES_FOUND=$LF" >> $GITHUB_OUTPUT
             echo "SUCCESS=true" >> $GITHUB_OUTPUT
           else
             echo "TOTAL_COVERAGE=0.00%" >> $GITHUB_OUTPUT
-            echo "COVERAGE_PERCENT=0.00" >> $GITHUB_OUTPUT
-            echo "LINES_HIT=0" >> $GITHUB_OUTPUT
-            echo "LINES_FOUND=0" >> $GITHUB_OUTPUT
             echo "SUCCESS=false" >> $GITHUB_OUTPUT
           fi
 
-      # Post coverage comment
-      - name: Post coverage comment
-        if: steps.coverage.outputs.SUCCESS == 'true'
+      - name: Post PR comment
+        if: always()
         run: |
-          curl -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-               -X POST \
-               -d "{\"body\": \"✅ Test Coverage: **${{ steps.coverage.outputs.TOTAL_COVERAGE }}**\"}" \
-               "${{ github.api_url }}/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments"
+          COMMENT=""
+          if [ "${{ steps.coverage.outputs.SUCCESS }}" == "true" ]; then
+            COMMENT="✅ Test Coverage: **${{ steps.coverage.outputs.TOTAL_COVERAGE }}**"
+          else
+            COMMENT="❌ Coverage check failed. Check workflow logs."
+          fi
 
-      # Post failure comment
-      - name: Post failure comment
-        if: steps.coverage.outputs.SUCCESS != 'true'
-        run: |
-          curl -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+               -H "Content-Type: application/json" \
                -X POST \
-               -d "{\"body\": \"❌ Coverage check failed. [View logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})\"}" \
-               "${{ github.api_url }}/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments"
+               -d "{\"body\":\"$COMMENT\"}" \
+               https://api.github.com/repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/comments
