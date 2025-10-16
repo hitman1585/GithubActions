@@ -1,7 +1,7 @@
 name: PR Coverage on Approval
 
 on:
-  pull_request_review:
+  pull_request:
     types: [opened, labeled, reopened, synchronize]
 
 permissions:
@@ -15,8 +15,7 @@ concurrency:
 
 jobs:
   run-tests-and-coverage:
-    # Security note: Requires approval + run_ci label + same repo
-    # Anyone with write access can add labels - ensure team understands this
+    # Security note: Requires PR to target main + ci_run label + same repo
     if: |
       github.event.pull_request.base.ref == 'main' &&
       contains(github.event.pull_request.labels.*.name, 'ci_run')
@@ -206,16 +205,3 @@ jobs:
       # -----------------------
       # Post failure comment on PR
       # -----------------------
-      - name: Post failure comment
-        if: failure()
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
-        with:
-          script: |
-            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.payload.pull_request.number,
-              body: `❌ Coverage check failed. [View logs](${runUrl})`
-            });
