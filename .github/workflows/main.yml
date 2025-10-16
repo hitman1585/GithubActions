@@ -1,4 +1,4 @@
-name: PR Coverage on Approval
+nname: PR Coverage on Approval
 
 on:
   pull_request:
@@ -45,12 +45,36 @@ jobs:
 
       - name: Install coverage tools
         run: |
-          # Install xcparse via Homebrew
-          brew install chargepoint/xcparse/xcparse
+          set -e
+          
+          echo "📦 Installing coverage tools..."
+          
+          # Update Homebrew (suppress errors if already up to date)
+          brew update || true
+          
+          # Try installing xcparse
+          echo "Installing xcparse..."
+          if ! brew tap chargepoint/xcparse; then
+            echo "⚠️  Failed to tap chargepoint/xcparse, trying direct install..."
+          fi
+          
+          if ! brew install chargepoint/xcparse/xcparse; then
+            echo "❌ xcparse installation failed, will use alternative method"
+            USE_ALTERNATIVE=true
+          else
+            echo "✅ xcparse installed successfully"
+            xcparse --version
+            USE_ALTERNATIVE=false
+          fi
           
           # Install xcodecov-cli
+          echo "Installing xcodecov-cli..."
+          pip3 install --upgrade pip
           pip3 install xcodecov-cli==1.1.1
           xcodecov-cli --version
+          
+          # Export for next steps
+          echo "USE_ALTERNATIVE=$USE_ALTERNATIVE" >> $GITHUB_ENV
 
       - name: Run Unit Tests
         env:
@@ -78,12 +102,82 @@ jobs:
       - name: Convert coverage to LCOV
         if: success() || failure()
         run: |
-          if [ -d "TestResults.xcresult" ]; then
-            xcparse codecov TestResults.xcresult coverage.lcov
-            echo "✅ Coverage conversion successful"
-          else
+          set -e
+          
+          if [ ! -d "TestResults.xcresult" ]; then
             echo "❌ TestResults.xcresult not found"
             exit 1
+          fi
+          
+          if [ "$USE_ALTERNATIVE" = "true" ]; then
+            echo "Using alternative conversion method..."
+            
+            # Extract coverage JSON
+            xcrun xccov view --report --json TestResults.xcresult > coverage.json
+            
+            # Convert JSON to LCOV using Python
+            python3 << 'EOF'
+import json
+import sys
+
+try:
+    with open("coverage.json") as f:
+        data = json.load(f)
+    
+    with open("coverage.lcov", "w") as out:
+        for target in data.get("targets", []):
+            target_name = target.get("name", "")
+            for file_data in target.get("files", []):
+                path = file_data.get("path", "")
+                if not path:
+                    continue
+                    
+                out.write(f"TN:{target_name}\n")
+                out.write(f"SF:{path}\n")
+                
+                # Write function coverage
+                functions = file_data.get("functions", [])
+                for func in functions:
+                    name = func.get("name", "")
+                    line = func.get("lineNumber", 0)
+                    exec_count = func.get("executionCount", 0)
+                    if name and line:
+                        out.write(f"FN:{line},{name}\n")
+                
+                for func in functions:
+                    name = func.get("name", "")
+                    exec_count = func.get("executionCount", 0)
+                    if name:
+                        out.write(f"FNDA:{exec_count},{name}\n")
+                
+                out.write(f"FNF:{len(functions)}\n")
+                hit_funcs = sum(1 for f in functions if f.get("executionCount", 0) > 0)
+                out.write(f"FNH:{hit_funcs}\n")
+                
+                # Write line coverage
+                covered_lines = file_data.get("coveredLines", [])
+                for line in covered_lines:
+                    line_num = line.get("line", 0)
+                    exec_count = line.get("executionCount", 0)
+                    if line_num:
+                        out.write(f"DA:{line_num},{exec_count}\n")
+                
+                out.write(f"LF:{len(covered_lines)}\n")
+                hit_lines = sum(1 for l in covered_lines if l.get("executionCount", 0) > 0)
+                out.write(f"LH:{hit_lines}\n")
+                
+                out.write("end_of_record\n")
+    
+    print("✅ Coverage conversion successful (Python method)")
+    sys.exit(0)
+except Exception as e:
+    print(f"❌ Conversion failed: {e}")
+    sys.exit(1)
+EOF
+          else
+            echo "Using xcparse for conversion..."
+            xcparse codecov TestResults.xcresult coverage.lcov
+            echo "✅ Coverage conversion successful (xcparse method)"
           fi
 
       - name: Filter coverage
