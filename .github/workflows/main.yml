@@ -1,0 +1,221 @@
+name: PR Coverage on Approval
+
+on:
+  pull_request:
+    types: [opened, labeled, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: coverage-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  run-tests-and-coverage:
+    if: |
+      github.event.pull_request.base.ref == 'main' &&
+      contains(github.event.pull_request.labels.*.name, 'ci_run')
+    runs-on: macos-latest
+    timeout-minutes: 25
+
+    steps:
+      # -----------------------
+      # Checkout feature branch
+      # -----------------------
+      - name: Checkout PR branch
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.1.1
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 1  # Only need latest commit for testing
+
+      # -----------------------
+      # Select Xcode version
+      # -----------------------
+      - name: Select Xcode version
+        run: |
+          echo "Available Xcode versions:"
+          ls /Applications | grep Xcode || true
+          
+          # Use Xcode 16.2 if available, otherwise use latest stable
+          if [ -d "/Applications/Xcode_16.2.app" ]; then
+            # Note: sudo required for xcode-select on GitHub runners
+            sudo xcode-select -s /Applications/Xcode_16.2.app
+            echo "✅ Using Xcode 16.2"
+          else
+            echo "ℹ️  Xcode 16.2 not found, using latest stable Xcode"
+          fi
+          
+          xcodebuild -version
+
+      # -----------------------
+      # Install coverage tools
+      # -----------------------
+      - name: Install coverage tools
+        run: |
+          # Install xccov-to-lcov (pinned version for security)
+          if ! command -v xccov-to-lcov &> /dev/null; then
+            brew install xccov-to-lcov
+          fi
+          
+          # Install xcodecov-cli with pinned version for security - NO FALLBACK
+          pip3 install xcodecov-cli==1.1.1
+
+      # -----------------------
+      # Run Unit Tests with Coverage
+      # -----------------------
+      - name: Run Unit Tests
+        env:
+          SCHEME: "Development"
+        run: |
+          set -eo pipefail
+          
+          # Select iPhone 15 if available, otherwise use any iPhone
+          if xcrun simctl list devices available | grep -q "iPhone 15"; then
+            DEVICE="iPhone 15"
+          else
+            DEVICE=$(xcrun simctl list devices available | grep "iPhone" | head -1 | sed 's/.*(\([^)]*\)).*/\1/' | xargs)
+          fi
+          
+          echo "✅ Using device: $DEVICE"
+          
+          xcodebuild test \
+            -workspace Meesho.xcworkspace \
+            -scheme "$SCHEME" \
+            -destination "platform=iOS Simulator,name=$DEVICE" \
+            -enableCodeCoverage YES \
+            -parallel-testing-enabled YES \
+            -resultBundlePath TestResults.xcresult \
+            -derivedDataPath DerivedData
+
+      # -----------------------
+      # Convert coverage to LCOV
+      # -----------------------
+      - name: Convert coverage to LCOV
+        if: success() || failure()
+        run: |
+          if [ -d "TestResults.xcresult" ]; then
+            xcrun xccov view --report --json TestResults.xcresult > coverage.json
+            xccov-to-lcov coverage.json coverage.lcov
+            echo "✅ Coverage conversion successful"
+          else
+            echo "❌ TestResults.xcresult not found"
+            exit 1
+          fi
+
+      # -----------------------
+      # Filter coverage using .xcodecov.yaml
+      # -----------------------
+      - name: Filter coverage
+        if: success() || failure()
+        run: |
+          if [ -f "coverage.lcov" ]; then
+            # Security: Validate LCOV file format before processing
+            if ! head -1 coverage.lcov | grep -q "^TN:"; then
+              echo "❌ Invalid LCOV file format - possible tampering detected"
+              exit 1
+            fi
+            
+            if [ -f "ci_scripts/scripts/.xcodecov.yaml" ]; then
+              xcodecov-cli filter coverage.lcov \
+                -c ci_scripts/scripts/.xcodecov.yaml \
+                -o coverage_filtered.lcov
+            else
+              echo "⚠️  .xcodecov.yaml not found, using unfiltered coverage"
+              cp coverage.lcov coverage_filtered.lcov
+            fi
+            echo "✅ Coverage filtering complete"
+          else
+            echo "❌ coverage.lcov not found"
+            exit 1
+          fi
+
+      # -----------------------
+      # Calculate coverage percentage
+      # -----------------------
+      - name: Calculate coverage
+        id: coverage
+        if: success() || failure()
+        run: |
+          if [ -f "coverage_filtered.lcov" ]; then
+            # Extract lines hit (LH) and lines found (LF) from LCOV
+            LH=$(grep -h "^LH:" coverage_filtered.lcov | awk -F: '{sum+=$2} END {print sum+0}')
+            LF=$(grep -h "^LF:" coverage_filtered.lcov | awk -F: '{sum+=$2} END {print sum+0}')
+            
+            # Security: Validate LH and LF are integers
+            if ! [[ "$LH" =~ ^[0-9]+$ ]] || ! [[ "$LF" =~ ^[0-9]+$ ]]; then
+              echo "❌ Invalid coverage data detected"
+              echo "SUCCESS=false" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+            
+            echo "Lines Hit: $LH"
+            echo "Lines Found: $LF"
+            
+            if [ "$LF" -gt 0 ]; then
+              COVERAGE=$(awk "BEGIN {printf \"%.2f\", ($LH/$LF)*100}")
+              
+              # Validate coverage is a valid number (security: prevent injection)
+              if [[ "$COVERAGE" =~ ^[0-9]+\.[0-9]+$ ]]; then
+                echo "TOTAL_COVERAGE=${COVERAGE}%" >> $GITHUB_OUTPUT
+                echo "COVERAGE_PERCENT=${COVERAGE}" >> $GITHUB_OUTPUT
+                echo "LINES_HIT=$LH" >> $GITHUB_OUTPUT
+                echo "LINES_FOUND=$LF" >> $GITHUB_OUTPUT
+                echo "SUCCESS=true" >> $GITHUB_OUTPUT
+                echo "✅ Total Coverage: ${COVERAGE}%"
+              else
+                echo "❌ Invalid coverage format detected: $COVERAGE"
+                echo "SUCCESS=false" >> $GITHUB_OUTPUT
+                exit 1
+              fi
+            else
+              echo "TOTAL_COVERAGE=0.00%" >> $GITHUB_OUTPUT
+              echo "COVERAGE_PERCENT=0.00" >> $GITHUB_OUTPUT
+              echo "LINES_HIT=0" >> $GITHUB_OUTPUT
+              echo "LINES_FOUND=0" >> $GITHUB_OUTPUT
+              echo "SUCCESS=false" >> $GITHUB_OUTPUT
+              echo "⚠️  No lines found to calculate coverage"
+            fi
+          else
+            echo "TOTAL_COVERAGE=N/A" >> $GITHUB_OUTPUT
+            echo "SUCCESS=false" >> $GITHUB_OUTPUT
+            echo "❌ coverage_filtered.lcov not found"
+          fi
+
+      # -----------------------
+      # Post coverage comment on PR
+      # -----------------------
+      - name: Post coverage comment
+        if: steps.coverage.outputs.SUCCESS == 'true'
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
+        with:
+          script: |
+            const coverage = '${{ steps.coverage.outputs.TOTAL_COVERAGE }}';
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: `Test Coverage: **${coverage}**`
+            });
+
+      # -----------------------
+      # Post failure comment on PR
+      # -----------------------
+      - name: Post failure comment
+        if: failure()
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
+        with:
+          script: |
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: `❌ Coverage check failed. [View logs](${runUrl})`
+            });
+
+
+
