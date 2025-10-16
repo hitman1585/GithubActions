@@ -1,4 +1,4 @@
-nname: PR Coverage on Approval
+name: PR Coverage on Approval
 
 on:
   pull_request:
@@ -45,36 +45,10 @@ jobs:
 
       - name: Install coverage tools
         run: |
-          set -e
-          
-          echo "📦 Installing coverage tools..."
-          
-          # Update Homebrew (suppress errors if already up to date)
-          brew update || true
-          
-          # Try installing xcparse
-          echo "Installing xcparse..."
-          if ! brew tap chargepoint/xcparse; then
-            echo "⚠️  Failed to tap chargepoint/xcparse, trying direct install..."
-          fi
-          
-          if ! brew install chargepoint/xcparse/xcparse; then
-            echo "❌ xcparse installation failed, will use alternative method"
-            USE_ALTERNATIVE=true
-          else
-            echo "✅ xcparse installed successfully"
-            xcparse --version
-            USE_ALTERNATIVE=false
-          fi
-          
-          # Install xcodecov-cli
-          echo "Installing xcodecov-cli..."
-          pip3 install --upgrade pip
-          pip3 install xcodecov-cli==1.1.1
+          echo "📦 Installing xcodecov-cli..."
+          python3 -m pip install --break-system-packages xcodecov-cli==1.1.1
           xcodecov-cli --version
-          
-          # Export for next steps
-          echo "USE_ALTERNATIVE=$USE_ALTERNATIVE" >> $GITHUB_ENV
+          echo "✅ Coverage tools installed successfully"
 
       - name: Run Unit Tests
         env:
@@ -91,7 +65,7 @@ jobs:
           echo "✅ Using device: $DEVICE"
           
           xcodebuild test \
-            -workspace Meesho.xcworkspace \
+            -workspace GithubActions.xcworkspace \
             -scheme "$SCHEME" \
             -destination "platform=iOS Simulator,name=$DEVICE" \
             -enableCodeCoverage YES \
@@ -109,14 +83,13 @@ jobs:
             exit 1
           fi
           
-          if [ "$USE_ALTERNATIVE" = "true" ]; then
-            echo "Using alternative conversion method..."
-            
-            # Extract coverage JSON
-            xcrun xccov view --report --json TestResults.xcresult > coverage.json
-            
-            # Convert JSON to LCOV using Python
-            python3 << 'EOF'
+          echo "🔄 Converting coverage to LCOV format..."
+          
+          # Extract coverage JSON
+          xcrun xccov view --report --json TestResults.xcresult > coverage.json
+          
+          # Convert JSON to LCOV using Python
+          python3 << 'EOF'
 import json
 import sys
 
@@ -168,17 +141,12 @@ try:
                 
                 out.write("end_of_record\n")
     
-    print("✅ Coverage conversion successful (Python method)")
+    print("✅ Coverage conversion successful")
     sys.exit(0)
 except Exception as e:
     print(f"❌ Conversion failed: {e}")
     sys.exit(1)
 EOF
-          else
-            echo "Using xcparse for conversion..."
-            xcparse codecov TestResults.xcresult coverage.lcov
-            echo "✅ Coverage conversion successful (xcparse method)"
-          fi
 
       - name: Filter coverage
         if: success() || failure()
