@@ -43,10 +43,15 @@ jobs:
           
           xcodebuild -version
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Install coverage tools
         run: |
           echo "📦 Installing xcodecov-cli..."
-          python3 -m pip install --break-system-packages xcodecov-cli==1.1.1
+          pip install xcodecov-cli==1.1.1
           xcodecov-cli --version
           echo "✅ Coverage tools installed successfully"
 
