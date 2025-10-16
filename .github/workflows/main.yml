@@ -15,58 +15,52 @@ concurrency:
 
 jobs:
   run-tests-and-coverage:
-    # Security note: Requires PR to target main + ci_run label + same repo
     if: |
       github.event.pull_request.base.ref == 'main' &&
       contains(github.event.pull_request.labels.*.name, 'ci_run')
     runs-on: macos-latest
-    timeout-minutes: 25  # Reduced from 45 to save costs on hung jobs
+    timeout-minutes: 25
 
     steps:
+      # -----------------------
+      # Checkout PR branch
+      # -----------------------
       - name: Checkout PR branch
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.1.1
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 1
 
+      # -----------------------
+      # Select Xcode version
+      # -----------------------
       - name: Select Xcode version
         run: |
-          echo "Available Xcode versions:"
-          ls /Applications | grep Xcode || true
-          
           if [ -d "/Applications/Xcode_16.2.app" ]; then
             sudo xcode-select -s /Applications/Xcode_16.2.app
             echo "✅ Using Xcode 16.2"
           else
             echo "ℹ️  Xcode 16.2 not found, using default Xcode"
           fi
-          
           xcodebuild -version
 
+      # -----------------------
+      # Setup Python
+      # -----------------------
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install coverage tools
-        run: |
-          echo "📦 Installing xcodecov-cli..."
-          pip install xcodecov-cli==1.1.1
-          xcodecov-cli --version
-          echo "✅ Coverage tools installed successfully"
-
+      # -----------------------
+      # Run Unit Tests with coverage
+      # -----------------------
       - name: Run Unit Tests
         env:
           SCHEME: "GithubActions"
         run: |
           set -eo pipefail
-          
-          if xcrun simctl list devices available | grep -q "iPhone 15"; then
-            DEVICE="iPhone 15"
-          else
-            DEVICE=$(xcrun simctl list devices available | grep "iPhone" | head -1 | sed 's/.*(\([^)]*\)).*/\1/' | xargs)
-          fi
-          
+          DEVICE=$(xcrun simctl list devices available | grep -q "iPhone 15" && echo "iPhone 15" || xcrun simctl list devices available | grep "iPhone" | head -1 | sed 's/.*(\([^)]*\)).*/\1/' | xargs)
           echo "✅ Using device: $DEVICE"
           
           xcodebuild test \
@@ -78,22 +72,16 @@ jobs:
             -resultBundlePath TestResults.xcresult \
             -derivedDataPath DerivedData
 
+      # -----------------------
+      # Convert coverage to LCOV
+      # -----------------------
       - name: Convert coverage to LCOV
         if: success() || failure()
         run: |
           set -e
-          
-          if [ ! -d "TestResults.xcresult" ]; then
-            echo "❌ TestResults.xcresult not found"
-            exit 1
-          fi
-          
-          echo "🔄 Converting coverage to LCOV format..."
-          
-          # Extract coverage JSON
+          [ -d "TestResults.xcresult" ] || { echo "❌ TestResults.xcresult not found"; exit 1; }
           xcrun xccov view --report --json TestResults.xcresult > coverage.json
-          
-          # Convert JSON to LCOV using Python
+
           python3 << 'EOF'
 import json
 import sys
@@ -101,51 +89,29 @@ import sys
 try:
     with open("coverage.json") as f:
         data = json.load(f)
-    
     with open("coverage.lcov", "w") as out:
         for target in data.get("targets", []):
             target_name = target.get("name", "")
             for file_data in target.get("files", []):
                 path = file_data.get("path", "")
-                if not path:
-                    continue
-                    
-                out.write(f"TN:{target_name}\n")
-                out.write(f"SF:{path}\n")
-                
-                # Write function coverage
-                functions = file_data.get("functions", [])
-                for func in functions:
-                    name = func.get("name", "")
-                    line = func.get("lineNumber", 0)
-                    exec_count = func.get("executionCount", 0)
-                    if name and line:
-                        out.write(f"FN:{line},{name}\n")
-                
-                for func in functions:
-                    name = func.get("name", "")
-                    exec_count = func.get("executionCount", 0)
-                    if name:
-                        out.write(f"FNDA:{exec_count},{name}\n")
-                
-                out.write(f"FNF:{len(functions)}\n")
-                hit_funcs = sum(1 for f in functions if f.get("executionCount", 0) > 0)
-                out.write(f"FNH:{hit_funcs}\n")
-                
-                # Write line coverage
-                covered_lines = file_data.get("coveredLines", [])
-                for line in covered_lines:
-                    line_num = line.get("line", 0)
-                    exec_count = line.get("executionCount", 0)
-                    if line_num:
-                        out.write(f"DA:{line_num},{exec_count}\n")
-                
-                out.write(f"LF:{len(covered_lines)}\n")
-                hit_lines = sum(1 for l in covered_lines if l.get("executionCount", 0) > 0)
-                out.write(f"LH:{hit_lines}\n")
-                
+                if not path: continue
+                out.write(f"TN:{target_name}\nSF:{path}\n")
+                funcs = file_data.get("functions", [])
+                for func in funcs:
+                    if func.get("name") and func.get("lineNumber"):
+                        out.write(f"FN:{func['lineNumber']},{func['name']}\n")
+                for func in funcs:
+                    if func.get("name"):
+                        out.write(f"FNDA:{func['executionCount']},{func['name']}\n")
+                out.write(f"FNF:{len(funcs)}\n")
+                out.write(f"FNH:{sum(1 for f in funcs if f.get('executionCount',0)>0)}\n")
+                lines = file_data.get("coveredLines", [])
+                for line in lines:
+                    if line.get("line"):
+                        out.write(f"DA:{line['line']},{line['executionCount']}\n")
+                out.write(f"LF:{len(lines)}\n")
+                out.write(f"LH:{sum(1 for l in lines if l.get('executionCount',0)>0)}\n")
                 out.write("end_of_record\n")
-    
     print("✅ Coverage conversion successful")
     sys.exit(0)
 except Exception as e:
@@ -153,21 +119,27 @@ except Exception as e:
     sys.exit(1)
 EOF
 
+      # -----------------------
+      # Filter coverage according to .xcodecov.yaml
+      # -----------------------
       - name: Filter coverage
         if: success() || failure()
         run: |
           if [ -f "coverage.lcov" ]; then
-            if ! head -1 coverage.lcov | grep -q "^TN:"; then
-              echo "❌ Invalid LCOV file format"
-              exit 1
-            fi
-            
             if [ -f "ci_scripts/scripts/.xcodecov.yaml" ]; then
-              xcodecov-cli filter coverage.lcov \
-                -c ci_scripts/scripts/.xcodecov.yaml \
-                -o coverage_filtered.lcov
+              # Extract ignore patterns
+              IGNORES=$(grep -A100 "ignore:" ci_scripts/scripts/.xcodecov.yaml | tail -n +2 | sed 's/- //g')
+              cp coverage.lcov coverage_filtered.lcov.tmp
+              for pattern in $IGNORES; do
+                awk -v pat="$pattern" '
+                /^SF:/ {skip=($0 ~ pat)?1:0} 
+                !skip {print} 
+                /^end_of_record/ {skip=0}
+                ' coverage_filtered.lcov.tmp > coverage_filtered.lcov.tmp2
+                mv coverage_filtered.lcov.tmp2 coverage_filtered.lcov.tmp
+              done
+              mv coverage_filtered.lcov.tmp coverage_filtered.lcov
             else
-              echo "⚠️  .xcodecov.yaml not found, using unfiltered coverage"
               cp coverage.lcov coverage_filtered.lcov
             fi
             echo "✅ Coverage filtering complete"
@@ -176,6 +148,9 @@ EOF
             exit 1
           fi
 
+      # -----------------------
+      # Calculate total coverage
+      # -----------------------
       - name: Calculate coverage
         id: coverage
         if: success() || failure()
@@ -183,69 +158,34 @@ EOF
           if [ -f "coverage_filtered.lcov" ]; then
             LH=$(grep -h "^LH:" coverage_filtered.lcov | awk -F: '{sum+=$2} END {print sum+0}')
             LF=$(grep -h "^LF:" coverage_filtered.lcov | awk -F: '{sum+=$2} END {print sum+0}')
-            
-            if ! [[ "$LH" =~ ^[0-9]+$ ]] || ! [[ "$LF" =~ ^[0-9]+$ ]]; then
-              echo "❌ Invalid coverage data"
-              echo "SUCCESS=false" >> $GITHUB_OUTPUT
-              exit 1
-            fi
-            
-            echo "Lines Hit: $LH"
-            echo "Lines Found: $LF"
-            
             if [ "$LF" -gt 0 ]; then
               COVERAGE=$(awk "BEGIN {printf \"%.2f\", ($LH/$LF)*100}")
-              
-              if [[ "$COVERAGE" =~ ^[0-9]+\.[0-9]+$ ]]; then
-                echo "TOTAL_COVERAGE=${COVERAGE}%" >> $GITHUB_OUTPUT
-                echo "COVERAGE_PERCENT=${COVERAGE}" >> $GITHUB_OUTPUT
-                echo "LINES_HIT=$LH" >> $GITHUB_OUTPUT
-                echo "LINES_FOUND=$LF" >> $GITHUB_OUTPUT
-                echo "SUCCESS=true" >> $GITHUB_OUTPUT
-                echo "✅ Total Coverage: ${COVERAGE}%"
-              else
-                echo "❌ Invalid coverage format: $COVERAGE"
-                echo "SUCCESS=false" >> $GITHUB_OUTPUT
-                exit 1
-              fi
+              echo "TOTAL_COVERAGE=${COVERAGE}%" >> $GITHUB_OUTPUT
+              echo "SUCCESS=true" >> $GITHUB_OUTPUT
             else
               echo "TOTAL_COVERAGE=0.00%" >> $GITHUB_OUTPUT
-              echo "COVERAGE_PERCENT=0.00" >> $GITHUB_OUTPUT
-              echo "LINES_HIT=0" >> $GITHUB_OUTPUT
-              echo "LINES_FOUND=0" >> $GITHUB_OUTPUT
               echo "SUCCESS=false" >> $GITHUB_OUTPUT
-              echo "⚠️  No lines found"
             fi
           else
             echo "TOTAL_COVERAGE=N/A" >> $GITHUB_OUTPUT
             echo "SUCCESS=false" >> $GITHUB_OUTPUT
-            echo "❌ coverage_filtered.lcov not found"
           fi
 
+      # -----------------------
+      # Post coverage comment
+      # -----------------------
       - name: Post coverage comment
         if: steps.coverage.outputs.SUCCESS == 'true'
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
-        with:
-          script: |
-            const coverage = '${{ steps.coverage.outputs.TOTAL_COVERAGE }}';
-            
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.payload.pull_request.number,
-              body: `✅ Test Coverage: **${coverage}**`
-            });
+        run: |
+          COVERAGE="${{ steps.coverage.outputs.TOTAL_COVERAGE }}"
+          PR_NUMBER=${{ github.event.pull_request.number }}
+          gh auth login --with-token < $GITHUB_TOKEN
+          gh pr comment $PR_NUMBER --body "✅ Test Coverage: **$COVERAGE**"
 
       - name: Post failure comment
-        if: failure()
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
-        with:
-          script: |
-            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.payload.pull_request.number,
-              body: `❌ Coverage check failed. [View logs](${runUrl})`
-            });
+        if: steps.coverage.outputs.SUCCESS != 'true'
+        run: |
+          PR_NUMBER=${{ github.event.pull_request.number }}
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          gh auth login --with-token < $GITHUB_TOKEN
+          gh pr comment $PR_NUMBER --body "❌ Coverage check failed. [View logs]($RUN_URL)"
