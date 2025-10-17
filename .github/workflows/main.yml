@@ -93,64 +93,66 @@ jobs:
           xcrun xccov view --report --json TestResults.xcresult > coverage.json
           
           # Convert JSON to LCOV using Python
-          python3 << 'EOF'
-import json
-import sys
-
-try:
-    with open("coverage.json") as f:
-        data = json.load(f)
-    
-    with open("coverage.lcov", "w") as out:
-        for target in data.get("targets", []):
-            target_name = target.get("name", "")
-            for file_data in target.get("files", []):
-                path = file_data.get("path", "")
-                if not path:
-                    continue
-                    
-                out.write(f"TN:{target_name}\n")
-                out.write(f"SF:{path}\n")
-                
-                # Write function coverage
-                functions = file_data.get("functions", [])
-                for func in functions:
-                    name = func.get("name", "")
-                    line = func.get("lineNumber", 0)
-                    exec_count = func.get("executionCount", 0)
-                    if name and line:
-                        out.write(f"FN:{line},{name}\n")
-                
-                for func in functions:
-                    name = func.get("name", "")
-                    exec_count = func.get("executionCount", 0)
-                    if name:
-                        out.write(f"FNDA:{exec_count},{name}\n")
-                
-                out.write(f"FNF:{len(functions)}\n")
-                hit_funcs = sum(1 for f in functions if f.get("executionCount", 0) > 0)
-                out.write(f"FNH:{hit_funcs}\n")
-                
-                # Write line coverage
-                covered_lines = file_data.get("coveredLines", [])
-                for line in covered_lines:
-                    line_num = line.get("line", 0)
-                    exec_count = line.get("executionCount", 0)
-                    if line_num:
-                        out.write(f"DA:{line_num},{exec_count}\n")
-                
-                out.write(f"LF:{len(covered_lines)}\n")
-                hit_lines = sum(1 for l in covered_lines if l.get("executionCount", 0) > 0)
-                out.write(f"LH:{hit_lines}\n")
-                
-                out.write("end_of_record\n")
-    
-    print("✅ Coverage conversion successful")
-    sys.exit(0)
-except Exception as e:
-    print(f"❌ Conversion failed: {e}")
-    sys.exit(1)
-EOF
+          cat > convert_coverage.py << 'PYEOF'
+          import json
+          import sys
+          
+          try:
+              with open("coverage.json") as f:
+                  data = json.load(f)
+              
+              with open("coverage.lcov", "w") as out:
+                  for target in data.get("targets", []):
+                      target_name = target.get("name", "")
+                      for file_data in target.get("files", []):
+                          path = file_data.get("path", "")
+                          if not path:
+                              continue
+                              
+                          out.write(f"TN:{target_name}\n")
+                          out.write(f"SF:{path}\n")
+                          
+                          # Write function coverage
+                          functions = file_data.get("functions", [])
+                          for func in functions:
+                              name = func.get("name", "")
+                              line = func.get("lineNumber", 0)
+                              exec_count = func.get("executionCount", 0)
+                              if name and line:
+                                  out.write(f"FN:{line},{name}\n")
+                          
+                          for func in functions:
+                              name = func.get("name", "")
+                              exec_count = func.get("executionCount", 0)
+                              if name:
+                                  out.write(f"FNDA:{exec_count},{name}\n")
+                          
+                          out.write(f"FNF:{len(functions)}\n")
+                          hit_funcs = sum(1 for f in functions if f.get("executionCount", 0) > 0)
+                          out.write(f"FNH:{hit_funcs}\n")
+                          
+                          # Write line coverage
+                          covered_lines = file_data.get("coveredLines", [])
+                          for line in covered_lines:
+                              line_num = line.get("line", 0)
+                              exec_count = line.get("executionCount", 0)
+                              if line_num:
+                                  out.write(f"DA:{line_num},{exec_count}\n")
+                          
+                          out.write(f"LF:{len(covered_lines)}\n")
+                          hit_lines = sum(1 for l in covered_lines if l.get("executionCount", 0) > 0)
+                          out.write(f"LH:{hit_lines}\n")
+                          
+                          out.write("end_of_record\n")
+              
+              print("✅ Coverage conversion successful")
+              sys.exit(0)
+          except Exception as e:
+              print(f"❌ Conversion failed: {e}")
+              sys.exit(1)
+          PYEOF
+          
+          python3 convert_coverage.py
 
       - name: Filter coverage
         if: success() || failure()
