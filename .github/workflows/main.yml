@@ -28,22 +28,26 @@ jobs:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 1
 
-      - name: Setup Latest Available Xcode
+      - name: Setup Latest Stable Xcode
         run: |
           echo "📱 Available Xcode versions:"
           ls /Applications | grep Xcode
           
-          # Find latest Xcode
-          LATEST_XCODE=$(ls /Applications | grep "Xcode" | grep -v "beta" | sort -V | tail -1)
+          # Find latest STABLE Xcode (exclude beta, RC, preview)
+          LATEST_XCODE=$(ls /Applications | grep "Xcode" | grep -v -i "beta" | grep -v -i "RC" | grep -v -i "preview" | sort -V | tail -1)
           
           if [ -z "$LATEST_XCODE" ]; then
-            echo "Using default Xcode"
+            echo "⚠️  No stable Xcode found, using default"
           else
             sudo xcode-select -s /Applications/$LATEST_XCODE/Contents/Developer
             echo "✅ Using $LATEST_XCODE"
           fi
           
           xcodebuild -version
+          
+          echo ""
+          echo "📱 Available iOS runtimes:"
+          xcrun simctl list runtimes iOS
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -53,51 +57,58 @@ jobs:
       - name: Find Available Simulator
         id: simulator
         run: |
-          echo "📱 Available iOS runtimes:"
-          xcrun simctl list runtimes iOS
-          
-          echo ""
-          echo "📱 Available devices:"
-          xcrun simctl list devices available iOS
-          
           # Get the latest available iOS runtime
           RUNTIME=$(xcrun simctl list runtimes iOS -j | \
             jq -r '.runtimes | map(select(.isAvailable == true)) | sort_by(.version) | last | .identifier')
           
           if [ -z "$RUNTIME" ]; then
             echo "❌ No iOS runtime available!"
+            echo "Available runtimes:"
+            xcrun simctl list runtimes
             exit 1
           fi
           
           echo "✅ Using runtime: $RUNTIME"
           
-          # Find or create an iPhone simulator with this runtime
+          # Find an existing iPhone simulator with this runtime
           DEVICE_UDID=$(xcrun simctl list devices -j | \
             jq -r --arg runtime "$RUNTIME" '.devices[$runtime] | .[]? | select(.name | contains("iPhone")) | .udid' | \
             head -1)
           
           if [ -z "$DEVICE_UDID" ]; then
-            echo "📱 Creating iPhone simulator..."
-            # Try iPhone 15, fallback to iPhone 14, then any iPhone
+            echo "📱 No existing iPhone found, creating one..."
+            
+            # Get latest iPhone device type
             DEVICE_TYPE=$(xcrun simctl list devicetypes -j | \
               jq -r '.devicetypes | map(select(.name | contains("iPhone"))) | sort_by(.name) | last | .identifier')
             
+            if [ -z "$DEVICE_TYPE" ]; then
+              DEVICE_TYPE="com.apple.CoreSimulator.SimDeviceType.iPhone-15"
+            fi
+            
+            echo "Creating device with type: $DEVICE_TYPE"
             DEVICE_UDID=$(xcrun simctl create "CI-iPhone" "$DEVICE_TYPE" "$RUNTIME")
             echo "✅ Created simulator: $DEVICE_UDID"
           else
             echo "✅ Found existing simulator: $DEVICE_UDID"
           fi
           
-          # Boot the simulator
+          # Get device info
+          DEVICE_INFO=$(xcrun simctl list devices -j | jq -r --arg udid "$DEVICE_UDID" '.devices[][] | select(.udid == $udid) | "\(.name) (\(.state))"')
+          echo "Device info: $DEVICE_INFO"
+          
+          # Boot the simulator if not booted
           echo "🚀 Booting simulator..."
           xcrun simctl boot "$DEVICE_UDID" 2>/dev/null || echo "Already booted"
           
           # Wait for boot
           for i in {1..30}; do
-            if xcrun simctl list devices | grep "$DEVICE_UDID" | grep -q "Booted"; then
+            STATE=$(xcrun simctl list devices -j | jq -r --arg udid "$DEVICE_UDID" '.devices[][] | select(.udid == $udid) | .state')
+            if [ "$STATE" = "Booted" ]; then
               echo "✅ Simulator booted"
               break
             fi
+            echo "Waiting for boot... ($STATE)"
             sleep 1
           done
           
