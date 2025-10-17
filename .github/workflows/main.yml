@@ -30,18 +30,33 @@ jobs:
 
       - name: Setup Latest Stable Xcode
         run: |
-          echo "📱 Available Xcode versions:"
-          ls /Applications | grep Xcode
+          echo "📱 All available Xcode versions:"
+          ls -la /Applications | grep Xcode
           
-          # Find latest STABLE Xcode (exclude beta, RC, preview)
-          LATEST_XCODE=$(ls /Applications | grep "Xcode" | grep -v -i "beta" | grep -v -i "RC" | grep -v -i "preview" | sort -V | tail -1)
-          
-          if [ -z "$LATEST_XCODE" ]; then
-            echo "⚠️  No stable Xcode found, using default"
+          # Find stable Xcode - prefer Xcode.app, then numbered without beta/RC/preview
+          if [ -d "/Applications/Xcode.app" ]; then
+            SELECTED_XCODE="Xcode.app"
           else
-            sudo xcode-select -s /Applications/$LATEST_XCODE/Contents/Developer
-            echo "✅ Using $LATEST_XCODE"
+            # Get only stable versions (exclude beta, RC, preview, GM seed)
+            SELECTED_XCODE=$(ls /Applications | \
+              grep "^Xcode" | \
+              grep -v -i beta | \
+              grep -v -i "RC" | \
+              grep -v -i preview | \
+              grep -v -i "GM_seed" | \
+              sort -V | \
+              tail -1)
           fi
+          
+          if [ -z "$SELECTED_XCODE" ]; then
+            echo "❌ No stable Xcode found!"
+            echo "Available:"
+            ls /Applications | grep Xcode
+            exit 1
+          fi
+          
+          echo "✅ Selected: $SELECTED_XCODE"
+          sudo xcode-select -s /Applications/$SELECTED_XCODE/Contents/Developer
           
           xcodebuild -version
           
@@ -99,18 +114,23 @@ jobs:
           
           # Boot the simulator if not booted
           echo "🚀 Booting simulator..."
-          xcrun simctl boot "$DEVICE_UDID" 2>/dev/null || echo "Already booted"
+          xcrun simctl boot "$DEVICE_UDID" 2>/dev/null || echo "Already booted or failed"
           
           # Wait for boot
           for i in {1..30}; do
             STATE=$(xcrun simctl list devices -j | jq -r --arg udid "$DEVICE_UDID" '.devices[][] | select(.udid == $udid) | .state')
             if [ "$STATE" = "Booted" ]; then
-              echo "✅ Simulator booted"
+              echo "✅ Simulator booted successfully"
               break
             fi
             echo "Waiting for boot... ($STATE)"
             sleep 1
           done
+          
+          # Verify Xcode is using the right developer path
+          echo ""
+          echo "Xcode developer path:"
+          xcode-select -p
           
           echo "DEVICE_UDID=$DEVICE_UDID" >> $GITHUB_OUTPUT
 
@@ -119,6 +139,17 @@ jobs:
           SCHEME: "GithubActions"
           DEVICE_UDID: ${{ steps.simulator.outputs.DEVICE_UDID }}
         run: |
+          # Double-check we're not using beta
+          XCODE_PATH=$(xcode-select -p)
+          echo "Using Xcode at: $XCODE_PATH"
+          
+          if echo "$XCODE_PATH" | grep -i "beta"; then
+            echo "❌ Still using beta Xcode! Attempting to fix..."
+            sudo xcode-select -s /Applications/Xcode.app/Contents/Developer || true
+          fi
+          
+          xcodebuild -version
+          
           echo "🧪 Starting tests at $(date +%H:%M:%S)"
           echo "Using device: $DEVICE_UDID"
           
