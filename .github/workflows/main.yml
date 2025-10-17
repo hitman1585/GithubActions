@@ -53,28 +53,28 @@ jobs:
         run: |
           set -eo pipefail
           
-          # List available destinations for the scheme
-          echo "📱 Available destinations for scheme $SCHEME:"
-          xcodebuild test -workspace GithubActions.xcworkspace -scheme "$SCHEME" -showdestinations || true
+          # List available simulators
+          echo "📱 Listing available iOS Simulators:"
+          xcrun simctl list devices available iOS
           
-          # Get the first available iOS Simulator destination
-          DESTINATION=$(xcodebuild test -workspace GithubActions.xcworkspace -scheme "$SCHEME" -showdestinations 2>/dev/null | \
-            grep "platform:iOS Simulator" | \
-            grep -v "generic" | \
+          # Get device ID of any available (booted or shutdown) iOS simulator
+          DEVICE_ID=$(xcrun simctl list devices available iOS | \
+            grep -E "iPhone [0-9]+" | \
+            grep -oE '\([A-F0-9-]{36}\)' | \
             head -1 | \
-            sed 's/^[[:space:]]*//' || echo "")
+            tr -d '()')
           
-          if [ -z "$DESTINATION" ]; then
-            echo "⚠️  No destination found via -showdestinations, using generic iOS Simulator"
-            DESTINATION="platform=iOS Simulator,OS=latest"
+          if [ -z "$DEVICE_ID" ]; then
+            echo "❌ No iOS Simulator found"
+            exit 1
           fi
           
-          echo "✅ Using destination: $DESTINATION"
+          echo "✅ Using device ID: $DEVICE_ID"
           
           xcodebuild test \
             -workspace GithubActions.xcworkspace \
             -scheme "$SCHEME" \
-            -destination "$DESTINATION" \
+            -destination "platform=iOS Simulator,id=$DEVICE_ID" \
             -enableCodeCoverage YES \
             -parallel-testing-enabled YES \
             -resultBundlePath TestResults.xcresult \
