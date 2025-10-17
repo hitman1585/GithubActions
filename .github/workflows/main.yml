@@ -19,7 +19,7 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'run_ci') &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: macos-latest
-    timeout-minutes: 10
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -44,6 +44,9 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install PyYAML
+        run: pip install pyyaml
+
       - name: Find Available Simulator
         id: simulator
         run: |
@@ -60,26 +63,41 @@ jobs:
           
           echo "DEVICE_UDID=$DEVICE_UDID" >> $GITHUB_OUTPUT
 
-      - name: Run Tests
+      - name: Run All Module Tests
         env:
           SCHEME: "GithubActions"
           DEVICE_UDID: ${{ steps.simulator.outputs.DEVICE_UDID }}
         run: |
-          echo "🧪 Running tests..."
+          echo "🧪 Running ALL module tests..."
+          echo "This includes:"
+          echo "  - CheckoutTests"
+          echo "  - HelpCentreKitImplTests"
+          echo "  - LoginModuleTests"
+          echo "  - MAnalyticsTests"
+          echo "  - MeeshoCommonTests"
+          echo "  - And any other test targets"
+          echo ""
           
+          START_TIME=$(date +%s)
+          
+          # Run all tests (no -only-testing filter)
+          # This will run all test bundles in the scheme
           xcodebuild test \
             -workspace GithubActions.xcworkspace \
             -scheme "$SCHEME" \
             -destination "platform=iOS Simulator,id=$DEVICE_UDID" \
             -skip-testing:GithubActionsUITests \
-            -only-testing:GithubActionsTests \
             -enableCodeCoverage YES \
             -resultBundlePath TestResults.xcresult \
             -derivedDataPath DerivedData \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO
+          
+          END_TIME=$(date +%s)
+          echo ""
+          echo "✅ All tests completed in $((END_TIME - START_TIME)) seconds"
 
-      - name: Generate Coverage Report
+      - name: Generate Project-Wide Coverage Report
         if: always()
         run: |
           if [ ! -d "TestResults.xcresult" ]; then
@@ -87,14 +105,27 @@ jobs:
             exit 1
           fi
           
-          echo "📊 Generating coverage report..."
+          echo "📊 Generating project-wide coverage report..."
           xcrun xccov view --report --json TestResults.xcresult > coverage.json
+          
+          echo ""
+          echo "📊 Coverage Summary by Target:"
+          cat coverage.json | jq -r '.targets[] | "\(.name): \(.lineCoverage * 100 | floor)% (\(.coveredLines)/\(.executableLines) lines)"'
+          
+          echo ""
+          echo "📊 Total project coverage (before filtering):"
+          cat coverage.json | jq '{coveredLines: .coveredLines, executableLines: .executableLines, lineCoverage: (.lineCoverage * 100)}'
+          
+          echo ""
+          echo "📊 Converting to LCOV format..."
           
           python3 << 'PYEOF'
           import json
           
           with open("coverage.json") as f:
               data = json.load(f)
+          
+          total_files = 0
           
           with open("coverage.lcov", "w") as out:
               for target in data.get("targets", []):
@@ -104,6 +135,8 @@ jobs:
                       path = file_data.get("path", "")
                       if not path:
                           continue
+                      
+                      total_files += 1
                       
                       out.write(f"TN:{target_name}\n")
                       out.write(f"SF:{path}\n")
@@ -126,7 +159,7 @@ jobs:
                           out.write(f"FNF:{len(functions)}\n")
                           out.write(f"FNH:{sum(1 for f in functions if f.get('executionCount', 0) > 0)}\n")
                       
-                      # Lines - use executableLines and lineCoverage from file level
+                      # Lines
                       executable_lines = file_data.get("executableLines", 0)
                       line_coverage = file_data.get("lineCoverage", 0.0)
                       
@@ -137,34 +170,170 @@ jobs:
                       
                       out.write("end_of_record\n")
           
-          print("✅ Coverage report generated")
+          print(f"✅ Generated LCOV for {total_files} files")
+          PYEOF
+
+      - name: Filter Coverage using .xcodecov.yaml
+        if: always()
+        run: |
+          echo "🔍 ===== COVERAGE FILTERING ====="
+          echo ""
+          
+          CONFIG_FILE="ci_scripts/scripts/.xcodecov.yaml"
+          
+          if [ -f "$CONFIG_FILE" ]; then
+            echo "✅ Found configuration file: $CONFIG_FILE"
+            echo ""
+            echo "📄 Exclusion patterns (first 20):"
+            head -20 "$CONFIG_FILE"
+            echo "..."
+          else
+            echo "❌ Configuration file not found: $CONFIG_FILE"
+            exit 1
+          fi
+          
+          # Show stats BEFORE filtering
+          echo ""
+          echo "📊 BEFORE Filtering:"
+          BEFORE_FILES=$(grep -c "^SF:" coverage.lcov)
+          BEFORE_LF=$(grep "^LF:" coverage.lcov | awk -F: '{sum+=$2} END {print sum+0}')
+          BEFORE_LH=$(grep "^LH:" coverage.lcov | awk -F: '{sum+=$2} END {print sum+0}')
+          BEFORE_COV=$(awk "BEGIN {printf \"%.2f\", ($BEFORE_LH/$BEFORE_LF)*100}")
+          
+          echo "  Files: $BEFORE_FILES"
+          echo "  Lines: $BEFORE_LH / $BEFORE_LF ($BEFORE_COV%)"
+          
+          # Apply filtering
+          python3 << 'PYEOF'
+          import yaml
+          import re
+          import os
+          
+          config_file = "ci_scripts/scripts/.xcodecov.yaml"
+          
+          print(f"\n🚫 Loading exclusion patterns from {config_file}...")
+          
+          with open(config_file, 'r') as f:
+              config = yaml.safe_load(f)
+          
+          ignore_patterns = config.get('ignore', [])
+          print(f"   Found {len(ignore_patterns)} exclusion patterns")
+          
+          # Read LCOV
+          with open("coverage.lcov", "r") as f:
+              content = f.read()
+          
+          blocks = content.split("end_of_record\n")
+          
+          filtered_blocks = []
+          included_count = 0
+          excluded_count = 0
+          excluded_by_pattern = {}
+          
+          for block in blocks:
+              if not block.strip():
+                  continue
+              
+              # Extract file path
+              sf_line = None
+              for line in block.strip().split("\n"):
+                  if line.startswith("SF:"):
+                      sf_line = line[3:]
+                      break
+              
+              if not sf_line:
+                  continue
+              
+              # Check against all patterns
+              exclude = False
+              matched_pattern = None
+              
+              # Exclude Pods
+              if "/Pods/" in sf_line or "/Pods\\" in sf_line:
+                  exclude = True
+                  matched_pattern = "Pods"
+              
+              # Check YAML patterns
+              if not exclude:
+                  for pattern in ignore_patterns:
+                      # Convert glob to regex
+                      regex_pattern = pattern.replace('**/', '').replace('*', '.*').replace('?', '.')
+                      if re.search(regex_pattern, sf_line):
+                          exclude = True
+                          matched_pattern = pattern
+                          break
+              
+              if exclude:
+                  excluded_count += 1
+                  if matched_pattern not in excluded_by_pattern:
+                      excluded_by_pattern[matched_pattern] = []
+                  excluded_by_pattern[matched_pattern].append(sf_line)
+              else:
+                  included_count += 1
+                  filtered_blocks.append(block.strip() + "\nend_of_record\n")
+          
+          # Write filtered LCOV
+          with open("coverage_filtered.lcov", "w") as f:
+              f.write("\n".join(filtered_blocks))
+          
+          print(f"\n📊 Filtering Results:")
+          print(f"   ✅ Included: {included_count} files")
+          print(f"   ❌ Excluded: {excluded_count} files")
+          
+          print(f"\n📋 Exclusions by pattern (top 10):")
+          sorted_patterns = sorted(excluded_by_pattern.items(), key=lambda x: len(x[1]), reverse=True)
+          for pattern, files in sorted_patterns[:10]:
+              print(f"   {pattern}: {len(files)} files")
           PYEOF
           
-          echo "✅ LCOV file generated"
-          echo "Preview:"
-          head -30 coverage.lcov
+          # Show stats AFTER filtering
+          echo ""
+          echo "📊 AFTER Filtering:"
+          AFTER_FILES=$(grep -c "^SF:" coverage_filtered.lcov 2>/dev/null || echo 0)
+          AFTER_LF=$(grep "^LF:" coverage_filtered.lcov 2>/dev/null | awk -F: '{sum+=$2} END {print sum+0}')
+          AFTER_LH=$(grep "^LH:" coverage_filtered.lcov 2>/dev/null | awk -F: '{sum+=$2} END {print sum+0}')
+          AFTER_COV=$(awk "BEGIN {printf \"%.2f\", ($AFTER_LH/$AFTER_LF)*100}")
+          
+          echo "  Files: $AFTER_FILES"
+          echo "  Lines: $AFTER_LH / $AFTER_LF ($AFTER_COV%)"
+          
+          echo ""
+          echo "📊 Filter Impact:"
+          echo "  Files removed: $((BEFORE_FILES - AFTER_FILES))"
+          echo "  Lines removed: $((BEFORE_LF - AFTER_LF))"
+          echo "  Coverage change: $BEFORE_COV% → $AFTER_COV%"
+          echo ""
+          echo "===== FILTERING COMPLETE ====="
 
-      - name: Calculate Coverage
+      - name: Calculate Final Coverage
         id: coverage
         if: always()
         run: |
-          if [ ! -f "coverage.lcov" ]; then
+          if [ ! -f "coverage_filtered.lcov" ]; then
+            echo "❌ No filtered coverage file"
             echo "TOTAL_COVERAGE=N/A" >> $GITHUB_OUTPUT
             echo "SUCCESS=false" >> $GITHUB_OUTPUT
             exit 0
           fi
           
-          LH=$(grep "^LH:" coverage.lcov | awk -F: '{sum+=$2} END {print sum+0}')
-          LF=$(grep "^LF:" coverage.lcov | awk -F: '{sum+=$2} END {print sum+0}')
+          LH=$(grep "^LH:" coverage_filtered.lcov | awk -F: '{sum+=$2} END {print sum+0}')
+          LF=$(grep "^LF:" coverage_filtered.lcov | awk -F: '{sum+=$2} END {print sum+0}')
+          FILES=$(grep -c "^SF:" coverage_filtered.lcov)
           
-          echo "Lines Hit: $LH"
-          echo "Lines Found: $LF"
+          echo "📊 Final Project-Wide Coverage:"
+          echo "  Files analyzed: $FILES"
+          echo "  Lines Hit: $LH"
+          echo "  Lines Found: $LF"
           
           if [ "$LF" -gt 0 ]; then
             COVERAGE=$(awk "BEGIN {printf \"%.2f\", ($LH/$LF)*100}")
             echo "TOTAL_COVERAGE=${COVERAGE}%" >> $GITHUB_OUTPUT
+            echo "FILES_ANALYZED=$FILES" >> $GITHUB_OUTPUT
+            echo "LINES_HIT=$LH" >> $GITHUB_OUTPUT
+            echo "LINES_TOTAL=$LF" >> $GITHUB_OUTPUT
             echo "SUCCESS=true" >> $GITHUB_OUTPUT
-            echo "✅ Coverage: ${COVERAGE}%"
+            echo ""
+            echo "🎯 Total Coverage: ${COVERAGE}%"
           else
             echo "TOTAL_COVERAGE=0.00%" >> $GITHUB_OUTPUT
             echo "SUCCESS=false" >> $GITHUB_OUTPUT
@@ -176,11 +345,24 @@ jobs:
         with:
           script: |
             const coverage = '${{ steps.coverage.outputs.TOTAL_COVERAGE }}';
+            const files = '${{ steps.coverage.outputs.FILES_ANALYZED }}';
+            const linesHit = '${{ steps.coverage.outputs.LINES_HIT }}';
+            const linesTotal = '${{ steps.coverage.outputs.LINES_TOTAL }}';
+            
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.payload.pull_request.number,
-              body: `✅ Test Coverage: **${coverage}**`
+              body: `## 📊 Test Coverage Report
+
+**Total Coverage:** **${coverage}**
+
+**Details:**
+- 📁 Files Analyzed: ${files}
+- ✅ Lines Covered: ${linesHit}
+- 📝 Total Lines: ${linesTotal}
+
+*Coverage calculated after excluding files per \`.xcodecov.yaml\` configuration*`
             });
 
       - name: Comment on Failure
@@ -189,6 +371,7 @@ jobs:
         with:
           script: |
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
