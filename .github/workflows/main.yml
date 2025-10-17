@@ -47,13 +47,6 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install coverage tools
-        run: |
-          echo "📦 Installing xcodecov-cli..."
-          pip install xcodecov-cli==1.1.1
-          xcodecov-cli --version
-          echo "✅ Coverage tools installed successfully"
-
       - name: Run Unit Tests
         env:
           SCHEME: "GithubActions"
@@ -154,28 +147,22 @@ jobs:
           
           python3 convert_coverage.py
 
-      - name: Filter coverage
+      - name: Filter coverage (optional)
         if: success() || failure()
         run: |
-          if [ -f "coverage.lcov" ]; then
-            if ! head -1 coverage.lcov | grep -q "^TN:"; then
-              echo "❌ Invalid LCOV file format"
-              exit 1
-            fi
-            
-            if [ -f "ci_scripts/scripts/.xcodecov.yaml" ]; then
-              xcodecov-cli filter coverage.lcov \
-                -c ci_scripts/scripts/.xcodecov.yaml \
-                -o coverage_filtered.lcov
-            else
-              echo "⚠️  .xcodecov.yaml not found, using unfiltered coverage"
-              cp coverage.lcov coverage_filtered.lcov
-            fi
-            echo "✅ Coverage filtering complete"
-          else
+          if [ ! -f "coverage.lcov" ]; then
             echo "❌ coverage.lcov not found"
             exit 1
           fi
+          
+          # Basic filtering - exclude Pods, Tests, and other unwanted files
+          echo "🔄 Filtering coverage data..."
+          
+          grep -v "^SF:/.*Pods/" coverage.lcov > coverage_filtered.lcov || cp coverage.lcov coverage_filtered.lcov
+          grep -v "^SF:/.*Tests/" coverage_filtered.lcov > coverage_temp.lcov || cp coverage_filtered.lcov coverage_temp.lcov
+          mv coverage_temp.lcov coverage_filtered.lcov
+          
+          echo "✅ Coverage filtering complete"
 
       - name: Calculate coverage
         id: coverage
