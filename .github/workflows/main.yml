@@ -353,16 +353,7 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.payload.pull_request.number,
-              body: `## 📊 Test Coverage Report
-
-**Total Coverage:** **${coverage}**
-
-**Details:**
-- 📁 Files Analyzed: ${files}
-- ✅ Lines Covered: ${linesHit}
-- 📝 Total Lines: ${linesTotal}
-
-*Coverage calculated after excluding files per \`.xcodecov.yaml\` configuration*`
+              body: '## 📊 Test Coverage Report\n\n**Total Coverage:** **' + coverage + '**\n\n**Details:**\n- 📁 Files Analyzed: ' + files + '\n- ✅ Lines Covered: ' + linesHit + '\n- 📝 Total Lines: ' + linesTotal + '\n\n*Coverage calculated after excluding files per .xcodecov.yaml configuration*'
             });
 
       - name: Comment on Failure
