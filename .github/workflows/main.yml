@@ -47,38 +47,40 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Verify Workspace and Scheme
+        run: |
+          echo "📂 Checking workspace and scheme..."
+          
+          # Check if workspace exists
+          if [ ! -f "GithubActions.xcworkspace/contents.xcworkspacedata" ]; then
+            echo "❌ GithubActions.xcworkspace not found!"
+            echo "Available workspaces:"
+            find . -name "*.xcworkspace" -maxdepth 2
+            exit 1
+          fi
+          
+          echo "✅ Workspace found"
+          
+          # List available schemes
+          echo "Available schemes:"
+          xcodebuild -workspace GithubActions.xcworkspace -list
+
       - name: Run Unit Tests
         env:
           SCHEME: "GithubActions"
         run: |
           set -eo pipefail
           
-          # List available simulators
-          echo "📱 Listing available iOS Simulators:"
-          xcrun simctl list devices available iOS
-          
-          # Get device ID of any available (booted or shutdown) iOS simulator
-          DEVICE_ID=$(xcrun simctl list devices available iOS | \
-            grep -E "iPhone [0-9]+" | \
-            grep -oE '\([A-F0-9-]{36}\)' | \
-            head -1 | \
-            tr -d '()')
-          
-          if [ -z "$DEVICE_ID" ]; then
-            echo "❌ No iOS Simulator found"
-            exit 1
-          fi
-          
-          echo "✅ Using device ID: $DEVICE_ID"
+          echo "🧪 Running tests for scheme: $SCHEME"
           
           xcodebuild test \
             -workspace GithubActions.xcworkspace \
             -scheme "$SCHEME" \
-            -destination "platform=iOS Simulator,id=$DEVICE_ID" \
+            -destination "generic/platform=iOS Simulator" \
             -enableCodeCoverage YES \
-            -parallel-testing-enabled YES \
             -resultBundlePath TestResults.xcresult \
-            -derivedDataPath DerivedData
+            -derivedDataPath DerivedData \
+            | tee xcodebuild.log
 
       - name: Convert coverage to LCOV
         if: success() || failure()
