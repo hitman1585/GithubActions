@@ -19,7 +19,7 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'run_ci') &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: macos-latest
-    timeout-minutes: 25
+    timeout-minutes: 45  # Increased timeout for simulator installation
 
     steps:
       - name: Checkout PR branch
@@ -47,13 +47,60 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: List Available Simulators
+      - name: Install iOS 18.2 Simulator Runtime
         run: |
-          echo "📱 All available simulators and runtimes:"
-          xcrun simctl list runtimes
-          echo ""
-          echo "Available devices:"
-          xcrun simctl list devices available
+          echo "📥 Checking for iOS 18.2 runtime..."
+          
+          # Check if iOS 18.2 runtime exists
+          if xcrun simctl list runtimes | grep -q "iOS 18.2"; then
+            echo "✅ iOS 18.2 runtime already installed"
+          else
+            echo "⚠️  iOS 18.2 runtime not found"
+            echo "Available runtimes:"
+            xcrun simctl list runtimes
+            
+            # Try to install iOS 18.2 runtime
+            echo "Attempting to install iOS 18.2 runtime..."
+            xcodebuild -downloadPlatform iOS || echo "Download command not available or failed"
+            
+            # If still not available, we'll use what's available
+            if ! xcrun simctl list runtimes | grep -q "iOS 18"; then
+              echo "⚠️  iOS 18.x runtime not available, workflow will use available runtime"
+            fi
+          fi
+
+      - name: Setup Simulator
+        run: |
+          echo "📱 Setting up iOS Simulator..."
+          
+          # Get the latest available iOS runtime
+          RUNTIME=$(xcrun simctl list runtimes iOS -j | \
+            jq -r '.runtimes | map(select(.isAvailable == true)) | sort_by(.version) | last | .identifier')
+          
+          if [ -z "$RUNTIME" ]; then
+            echo "❌ No iOS runtime available"
+            exit 1
+          fi
+          
+          echo "Using runtime: $RUNTIME"
+          
+          # Find or create iPhone 15 with the available runtime
+          DEVICE_UDID=$(xcrun simctl list devices -j | \
+            jq -r --arg runtime "$RUNTIME" '.devices[$runtime] | .[]? | select(.name == "iPhone 15") | .udid' | head -1)
+          
+          if [ -z "$DEVICE_UDID" ]; then
+            echo "Creating iPhone 15 simulator..."
+            DEVICE_UDID=$(xcrun simctl create "iPhone 15" "com.apple.CoreSimulator.SimDeviceType.iPhone-15" "$RUNTIME")
+          fi
+          
+          echo "✅ Using device: $DEVICE_UDID"
+          echo "DEVICE_UDID=$DEVICE_UDID" >> $GITHUB_ENV
+          
+          # Boot the simulator
+          xcrun simctl boot "$DEVICE_UDID" || echo "Simulator already booted or boot failed"
+          
+          # Wait a moment for boot
+          sleep 5
 
       - name: Run Unit Tests (Skip UI Tests)
         env:
@@ -62,12 +109,12 @@ jobs:
           set -eo pipefail
           
           echo "🧪 Running unit tests only for scheme: $SCHEME"
+          echo "Using device UDID: $DEVICE_UDID"
           
-          # Use the simplest destination - let xcodebuild pick the simulator
           xcodebuild test \
             -workspace GithubActions.xcworkspace \
             -scheme "$SCHEME" \
-            -destination 'platform=iOS Simulator,name=iPhone 15' \
+            -destination "platform=iOS Simulator,id=$DEVICE_UDID" \
             -skip-testing:GithubActionsUITests \
             -only-testing:GithubActionsTests \
             -enableCodeCoverage YES \
