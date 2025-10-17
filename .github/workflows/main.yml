@@ -53,10 +53,25 @@ jobs:
         run: |
           set -eo pipefail
           
-          if xcrun simctl list devices available | grep -q "iPhone 15"; then
+          # List all available simulators
+          echo "📱 Available simulators:"
+          xcrun simctl list devices available
+          
+          # Select device - prefer iPhone 15, otherwise use latest iPhone
+          if xcrun simctl list devices available | grep -q "iPhone 15 ("; then
             DEVICE="iPhone 15"
+          elif xcrun simctl list devices available | grep -q "iPhone 16"; then
+            DEVICE="iPhone 16"
+          elif xcrun simctl list devices available | grep -q "iPhone 14"; then
+            DEVICE="iPhone 14"
           else
-            DEVICE=$(xcrun simctl list devices available | grep "iPhone" | head -1 | sed 's/.*(\([^)]*\)).*/\1/' | xargs)
+            # Fallback to any available iPhone (excluding shutdown devices)
+            DEVICE=$(xcrun simctl list devices available iPhone | grep "iPhone" | grep -v "Shutdown" | head -1 | sed 's/^[[:space:]]*\(.*\) (.*/\1/' | xargs)
+          fi
+          
+          if [ -z "$DEVICE" ]; then
+            echo "❌ No available iPhone simulator found"
+            exit 1
           fi
           
           echo "✅ Using device: $DEVICE"
