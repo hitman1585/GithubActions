@@ -31,12 +31,14 @@ jobs:
         run: |
           echo "Available Xcode versions:"
           ls /Applications | grep Xcode || true
+          
           if [ -d "/Applications/Xcode_16.2.app" ]; then
             sudo xcode-select -s /Applications/Xcode_16.2.app
             echo "✅ Using Xcode 16.2"
           else
             echo "ℹ️  Xcode 16.2 not found, using default Xcode"
           fi
+          
           xcodebuild -version
 
       - name: Setup Python
@@ -44,28 +46,26 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install xcodecov-cli
-        run: |
-          python3 -m pip install --break-system-packages xcodecov-cli==1.1.1
-          xcodecov-cli --version
-          echo "✅ Coverage tools installed"
-
       - name: Run Unit Tests
         env:
           SCHEME: "GithubActions"
         run: |
           set -eo pipefail
+
           DEVICE=$(
             xcrun simctl list devices available |
             grep -m1 "iPhone" |
             awk -F '[()]' '{print $1}' |
             sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
           )
+
           if [ -z "$DEVICE" ]; then
             echo "❌ No available iPhone simulator found"
             exit 1
           fi
+
           echo "✅ Using device: $DEVICE"
+
           xcodebuild test \
             -workspace GithubActions.xcworkspace \
             -scheme "$SCHEME" \
@@ -79,47 +79,67 @@ jobs:
         if: success() || failure()
         run: |
           set -e
+
           if [ ! -d "TestResults.xcresult" ]; then
             echo "❌ TestResults.xcresult not found"
             exit 1
           fi
+
           echo "🔄 Converting coverage to LCOV format..."
           xcrun xccov view --report --json TestResults.xcresult > coverage.json
-          python3 << 'EOF'
-import json, sys
+
+          python3 <<'EOF'
+import json
+import sys
+
 try:
     with open("coverage.json") as f:
         data = json.load(f)
+
     with open("coverage.lcov", "w") as out:
         for target in data.get("targets", []):
             target_name = target.get("name", "")
             for file_data in target.get("files", []):
                 path = file_data.get("path", "")
-                if not path: continue
-                out.write(f"TN:{target_name}\nSF:{path}\n")
+                if not path:
+                    continue
+
+                out.write(f"TN:{target_name}\n")
+                out.write(f"SF:{path}\n")
+
                 functions = file_data.get("functions", [])
                 for func in functions:
                     name = func.get("name", "")
                     line = func.get("lineNumber", 0)
                     exec_count = func.get("executionCount", 0)
-                    if name and line: out.write(f"FN:{line},{name}\n")
+                    if name and line:
+                        out.write(f"FN:{line},{name}\n")
+
                 for func in functions:
                     name = func.get("name", "")
                     exec_count = func.get("executionCount", 0)
-                    if name: out.write(f"FNDA:{exec_count},{name}\n")
+                    if name:
+                        out.write(f"FNDA:{exec_count},{name}\n")
+
                 out.write(f"FNF:{len(functions)}\n")
                 hit_funcs = sum(1 for f in functions if f.get("executionCount", 0) > 0)
                 out.write(f"FNH:{hit_funcs}\n")
+
                 covered_lines = file_data.get("coveredLines", [])
                 for line in covered_lines:
                     line_num = line.get("line", 0)
                     exec_count = line.get("executionCount", 0)
-                    if line_num: out.write(f"DA:{line_num},{exec_count}\n")
+                    if line_num:
+                        out.write(f"DA:{line_num},{exec_count}\n")
+
                 out.write(f"LF:{len(covered_lines)}\n")
                 hit_lines = sum(1 for l in covered_lines if l.get("executionCount", 0) > 0)
-                out.write(f"LH:{hit_lines}\nend_of_record\n")
+                out.write(f"LH:{hit_lines}\n")
+                out.write("end_of_record\n")
+
     print("✅ Coverage conversion successful")
     sys.exit(0)
+
 except Exception as e:
     print(f"❌ Conversion failed: {e}")
     sys.exit(1)
@@ -133,8 +153,11 @@ EOF
               echo "❌ Invalid LCOV file format"
               exit 1
             fi
+            
             if [ -f "ci_scripts/scripts/.xcodecov.yaml" ]; then
-              xcodecov-cli filter coverage.lcov -c ci_scripts/scripts/.xcodecov.yaml -o coverage_filtered.lcov
+              xcodecov-cli filter coverage.lcov \
+                -c ci_scripts/scripts/.xcodecov.yaml \
+                -o coverage_filtered.lcov
             else
               echo "⚠️  .xcodecov.yaml not found, using unfiltered coverage"
               cp coverage.lcov coverage_filtered.lcov
@@ -152,15 +175,19 @@ EOF
           if [ -f "coverage_filtered.lcov" ]; then
             LH=$(grep -h "^LH:" coverage_filtered.lcov | awk -F: '{sum+=$2} END {print sum+0}')
             LF=$(grep -h "^LF:" coverage_filtered.lcov | awk -F: '{sum+=$2} END {print sum+0}')
+            
             if ! [[ "$LH" =~ ^[0-9]+$ ]] || ! [[ "$LF" =~ ^[0-9]+$ ]]; then
               echo "❌ Invalid coverage data"
               echo "SUCCESS=false" >> $GITHUB_OUTPUT
               exit 1
             fi
+            
             echo "Lines Hit: $LH"
             echo "Lines Found: $LF"
+            
             if [ "$LF" -gt 0 ]; then
               COVERAGE=$(awk "BEGIN {printf \"%.2f\", ($LH/$LF)*100}")
+              
               if [[ "$COVERAGE" =~ ^[0-9]+\.[0-9]+$ ]]; then
                 echo "TOTAL_COVERAGE=${COVERAGE}%" >> $GITHUB_OUTPUT
                 echo "COVERAGE_PERCENT=${COVERAGE}" >> $GITHUB_OUTPUT
