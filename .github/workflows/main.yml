@@ -28,9 +28,21 @@ jobs:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 1
 
-      - name: Setup Xcode
+      - name: Setup Latest Available Xcode
         run: |
-          sudo xcode-select -s /Applications/Xcode_16.2.app 2>/dev/null || true
+          echo "📱 Available Xcode versions:"
+          ls /Applications | grep Xcode
+          
+          # Find latest Xcode
+          LATEST_XCODE=$(ls /Applications | grep "Xcode" | grep -v "beta" | sort -V | tail -1)
+          
+          if [ -z "$LATEST_XCODE" ]; then
+            echo "Using default Xcode"
+          else
+            sudo xcode-select -s /Applications/$LATEST_XCODE/Contents/Developer
+            echo "✅ Using $LATEST_XCODE"
+          fi
+          
           xcodebuild -version
 
       - name: Setup Python
@@ -38,25 +50,78 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Find Available Simulator
+        id: simulator
+        run: |
+          echo "📱 Available iOS runtimes:"
+          xcrun simctl list runtimes iOS
+          
+          echo ""
+          echo "📱 Available devices:"
+          xcrun simctl list devices available iOS
+          
+          # Get the latest available iOS runtime
+          RUNTIME=$(xcrun simctl list runtimes iOS -j | \
+            jq -r '.runtimes | map(select(.isAvailable == true)) | sort_by(.version) | last | .identifier')
+          
+          if [ -z "$RUNTIME" ]; then
+            echo "❌ No iOS runtime available!"
+            exit 1
+          fi
+          
+          echo "✅ Using runtime: $RUNTIME"
+          
+          # Find or create an iPhone simulator with this runtime
+          DEVICE_UDID=$(xcrun simctl list devices -j | \
+            jq -r --arg runtime "$RUNTIME" '.devices[$runtime] | .[]? | select(.name | contains("iPhone")) | .udid' | \
+            head -1)
+          
+          if [ -z "$DEVICE_UDID" ]; then
+            echo "📱 Creating iPhone simulator..."
+            # Try iPhone 15, fallback to iPhone 14, then any iPhone
+            DEVICE_TYPE=$(xcrun simctl list devicetypes -j | \
+              jq -r '.devicetypes | map(select(.name | contains("iPhone"))) | sort_by(.name) | last | .identifier')
+            
+            DEVICE_UDID=$(xcrun simctl create "CI-iPhone" "$DEVICE_TYPE" "$RUNTIME")
+            echo "✅ Created simulator: $DEVICE_UDID"
+          else
+            echo "✅ Found existing simulator: $DEVICE_UDID"
+          fi
+          
+          # Boot the simulator
+          echo "🚀 Booting simulator..."
+          xcrun simctl boot "$DEVICE_UDID" 2>/dev/null || echo "Already booted"
+          
+          # Wait for boot
+          for i in {1..30}; do
+            if xcrun simctl list devices | grep "$DEVICE_UDID" | grep -q "Booted"; then
+              echo "✅ Simulator booted"
+              break
+            fi
+            sleep 1
+          done
+          
+          echo "DEVICE_UDID=$DEVICE_UDID" >> $GITHUB_OUTPUT
+
       - name: Run Tests
         env:
           SCHEME: "GithubActions"
+          DEVICE_UDID: ${{ steps.simulator.outputs.DEVICE_UDID }}
         run: |
           echo "🧪 Starting tests at $(date +%H:%M:%S)"
+          echo "Using device: $DEVICE_UDID"
+          
           OVERALL_START=$(date +%s)
           
-          # Use any available simulator - let Xcode pick
           xcodebuild test \
             -workspace GithubActions.xcworkspace \
             -scheme "$SCHEME" \
-            -sdk iphonesimulator \
-            -destination 'platform=iOS Simulator,name=Any iOS Simulator Device' \
+            -destination "platform=iOS Simulator,id=$DEVICE_UDID" \
             -skip-testing:GithubActionsUITests \
             -only-testing:GithubActionsTests \
             -enableCodeCoverage YES \
             -resultBundlePath TestResults.xcresult \
             -derivedDataPath DerivedData \
-            -allowProvisioningUpdates \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO
           
@@ -89,7 +154,6 @@ jobs:
                       out.write(f"TN:{target.get('name', '')}\n")
                       out.write(f"SF:{path}\n")
                       
-                      # Functions
                       functions = file_data.get("functions", [])
                       if isinstance(functions, list):
                           for func in functions:
@@ -107,7 +171,6 @@ jobs:
                           out.write(f"FNF:{len(functions)}\n")
                           out.write(f"FNH:{sum(1 for f in functions if f.get('executionCount', 0) > 0)}\n")
                       
-                      # Lines
                       lines = file_data.get("coveredLines", [])
                       if isinstance(lines, list):
                           for line in lines:
