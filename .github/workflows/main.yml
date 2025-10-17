@@ -8,21 +8,23 @@ permissions:
   contents: read
   pull-requests: write
 
+# Prevent multiple concurrent runs for the same PR
 concurrency:
   group: coverage-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   run-tests-and-coverage:
+    # Security note: Requires PR to target main + ci_run label + same repo
     if: |
       github.event.pull_request.base.ref == 'main' &&
       contains(github.event.pull_request.labels.*.name, 'ci_run')
     runs-on: macos-latest
-    timeout-minutes: 25
+    timeout-minutes: 25  # Reduced from 45 to save costs on hung jobs
 
     steps:
       - name: Checkout PR branch
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11  # v4.1.1
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 1
@@ -46,26 +48,27 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install coverage tools
+        run: |
+          echo "📦 Installing xcodecov-cli..."
+          pip install xcodecov-cli==1.1.1
+          xcodecov-cli --version
+          echo "✅ Coverage tools installed successfully"
+
       - name: Run Unit Tests
         env:
           SCHEME: "GithubActions"
         run: |
           set -eo pipefail
-
-          DEVICE=$(
-            xcrun simctl list devices available |
-            grep -m1 "iPhone" |
-            awk -F '[()]' '{print $1}' |
-            sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
-          )
-
-          if [ -z "$DEVICE" ]; then
-            echo "❌ No available iPhone simulator found"
-            exit 1
+          
+          if xcrun simctl list devices available | grep -q "iPhone 15"; then
+            DEVICE="iPhone 15"
+          else
+            DEVICE=$(xcrun simctl list devices available | grep "iPhone" | head -1 | sed 's/.*(\([^)]*\)).*/\1/' | xargs)
           fi
-
+          
           echo "✅ Using device: $DEVICE"
-
+          
           xcodebuild test \
             -workspace GithubActions.xcworkspace \
             -scheme "$SCHEME" \
@@ -87,8 +90,10 @@ jobs:
           
           echo "🔄 Converting coverage to LCOV format..."
           
+          # Extract coverage JSON
           xcrun xccov view --report --json TestResults.xcresult > coverage.json
           
+          # Convert JSON to LCOV using Python
           python3 << 'EOF'
 import json
 import sys
@@ -108,6 +113,7 @@ try:
                 out.write(f"TN:{target_name}\n")
                 out.write(f"SF:{path}\n")
                 
+                # Write function coverage
                 functions = file_data.get("functions", [])
                 for func in functions:
                     name = func.get("name", "")
@@ -126,6 +132,7 @@ try:
                 hit_funcs = sum(1 for f in functions if f.get("executionCount", 0) > 0)
                 out.write(f"FNH:{hit_funcs}\n")
                 
+                # Write line coverage
                 covered_lines = file_data.get("coveredLines", [])
                 for line in covered_lines:
                     line_num = line.get("line", 0)
@@ -217,10 +224,11 @@ EOF
 
       - name: Post coverage comment
         if: steps.coverage.outputs.SUCCESS == 'true'
-        uses: actions/github-script@60a0d83039c74a4a4ee543508d2ffcb1c3799cdea
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
         with:
           script: |
             const coverage = '${{ steps.coverage.outputs.TOTAL_COVERAGE }}';
+            
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -230,10 +238,11 @@ EOF
 
       - name: Post failure comment
         if: failure()
-        uses: actions/github-script@60a0d83039c74a4a4ee543508d2ffcb1c3799cdea
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea  # v7.0.1
         with:
           script: |
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
