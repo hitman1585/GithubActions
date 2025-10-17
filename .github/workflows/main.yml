@@ -30,28 +30,12 @@ jobs:
 
       - name: Setup Latest Stable Xcode
         run: |
-          echo "📱 All available Xcode versions:"
-          ls -la /Applications | grep Xcode
-          
           if [ -d "/Applications/Xcode.app" ]; then
             SELECTED_XCODE="Xcode.app"
           else
-            SELECTED_XCODE=$(ls /Applications | \
-              grep "^Xcode" | \
-              grep -v -i beta | \
-              grep -v -i "RC" | \
-              grep -v -i preview | \
-              grep -v -i "GM_seed" | \
-              sort -V | \
-              tail -1)
+            SELECTED_XCODE=$(ls /Applications | grep "^Xcode" | grep -v -i beta | grep -v -i "RC" | grep -v -i preview | sort -V | tail -1)
           fi
           
-          if [ -z "$SELECTED_XCODE" ]; then
-            echo "❌ No stable Xcode found!"
-            exit 1
-          fi
-          
-          echo "✅ Selected: $SELECTED_XCODE"
           sudo xcode-select -s /Applications/$SELECTED_XCODE/Contents/Developer
           xcodebuild -version
 
@@ -63,26 +47,12 @@ jobs:
       - name: Find Available Simulator
         id: simulator
         run: |
-          RUNTIME=$(xcrun simctl list runtimes iOS -j | \
-            jq -r '.runtimes | map(select(.isAvailable == true)) | sort_by(.version) | last | .identifier')
-          
-          if [ -z "$RUNTIME" ]; then
-            echo "❌ No iOS runtime available!"
-            exit 1
-          fi
-          
-          echo "✅ Using runtime: $RUNTIME"
-          
-          DEVICE_UDID=$(xcrun simctl list devices -j | \
-            jq -r --arg runtime "$RUNTIME" '.devices[$runtime] | .[]? | select(.name | contains("iPhone")) | .udid' | \
-            head -1)
+          RUNTIME=$(xcrun simctl list runtimes iOS -j | jq -r '.runtimes | map(select(.isAvailable == true)) | sort_by(.version) | last | .identifier')
+          DEVICE_UDID=$(xcrun simctl list devices -j | jq -r --arg runtime "$RUNTIME" '.devices[$runtime] | .[]? | select(.name | contains("iPhone")) | .udid' | head -1)
           
           if [ -z "$DEVICE_UDID" ]; then
-            DEVICE_TYPE=$(xcrun simctl list devicetypes -j | \
-              jq -r '.devicetypes | map(select(.name | contains("iPhone"))) | sort_by(.name) | last | .identifier')
-            
+            DEVICE_TYPE=$(xcrun simctl list devicetypes -j | jq -r '.devicetypes | map(select(.name | contains("iPhone"))) | last | .identifier')
             DEVICE_UDID=$(xcrun simctl create "CI-iPhone" "$DEVICE_TYPE" "$RUNTIME")
-            echo "✅ Created simulator: $DEVICE_UDID"
           fi
           
           xcrun simctl boot "$DEVICE_UDID" 2>/dev/null || true
@@ -95,8 +65,7 @@ jobs:
           SCHEME: "GithubActions"
           DEVICE_UDID: ${{ steps.simulator.outputs.DEVICE_UDID }}
         run: |
-          echo "🧪 Starting tests at $(date +%H:%M:%S)"
-          OVERALL_START=$(date +%s)
+          echo "🧪 Running tests..."
           
           xcodebuild test \
             -workspace GithubActions.xcworkspace \
@@ -109,118 +78,77 @@ jobs:
             -derivedDataPath DerivedData \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO
-          
-          OVERALL_END=$(date +%s)
-          echo "✅ Tests completed in $((OVERALL_END - OVERALL_START))s"
 
       - name: Generate Coverage Report
         if: always()
         run: |
-          echo "📊 Checking for test results..."
-          
           if [ ! -d "TestResults.xcresult" ]; then
-            echo "❌ TestResults.xcresult not found"
+            echo "❌ No TestResults.xcresult"
             exit 1
           fi
           
-          echo "✅ TestResults.xcresult found"
-          ls -lh TestResults.xcresult
-          
-          echo ""
-          echo "📊 Generating coverage JSON..."
+          echo "📊 Generating coverage report..."
           xcrun xccov view --report --json TestResults.xcresult > coverage.json
           
-          echo "✅ Coverage JSON generated"
-          echo "File size: $(wc -c < coverage.json) bytes"
-          echo "First 200 chars:"
-          head -c 200 coverage.json
-          echo ""
-          
-          echo "📊 Converting to LCOV..."
           python3 << 'PYEOF'
           import json
-          import sys
           
-          try:
-              with open("coverage.json") as f:
-                  data = json.load(f)
-              
-              print(f"Targets found: {len(data.get('targets', []))}")
-              
-              with open("coverage.lcov", "w") as out:
-                  for target in data.get("targets", []):
-                      print(f"Processing target: {target.get('name', 'Unknown')}")
-                      files = target.get("files", [])
-                      print(f"  Files in target: {len(files)}")
+          with open("coverage.json") as f:
+              data = json.load(f)
+          
+          with open("coverage.lcov", "w") as out:
+              for target in data.get("targets", []):
+                  target_name = target.get("name", "")
+                  
+                  for file_data in target.get("files", []):
+                      path = file_data.get("path", "")
+                      if not path:
+                          continue
                       
-                      for file_data in files:
-                          path = file_data.get("path", "")
-                          if not path:
-                              continue
+                      out.write(f"TN:{target_name}\n")
+                      out.write(f"SF:{path}\n")
+                      
+                      # Functions
+                      functions = file_data.get("functions", [])
+                      if isinstance(functions, list):
+                          for func in functions:
+                              name = func.get("name", "")
+                              line = func.get("lineNumber", 0)
+                              if name and line:
+                                  out.write(f"FN:{line},{name}\n")
                           
-                          out.write(f"TN:{target.get('name', '')}\n")
-                          out.write(f"SF:{path}\n")
+                          for func in functions:
+                              name = func.get("name", "")
+                              count = func.get("executionCount", 0)
+                              if name:
+                                  out.write(f"FNDA:{count},{name}\n")
                           
-                          functions = file_data.get("functions", [])
-                          if isinstance(functions, list):
-                              for func in functions:
-                                  name = func.get("name", "")
-                                  line = func.get("lineNumber", 0)
-                                  if name and line:
-                                      out.write(f"FN:{line},{name}\n")
-                              
-                              for func in functions:
-                                  name = func.get("name", "")
-                                  count = func.get("executionCount", 0)
-                                  if name:
-                                      out.write(f"FNDA:{count},{name}\n")
-                              
-                              out.write(f"FNF:{len(functions)}\n")
-                              out.write(f"FNH:{sum(1 for f in functions if f.get('executionCount', 0) > 0)}\n")
-                          
-                          lines = file_data.get("coveredLines", [])
-                          if isinstance(lines, list):
-                              for line in lines:
-                                  if isinstance(line, dict):
-                                      num = line.get("line", 0)
-                                      count = line.get("executionCount", 0)
-                                      if num:
-                                          out.write(f"DA:{num},{count}\n")
-                              
-                              out.write(f"LF:{len(lines)}\n")
-                              out.write(f"LH:{sum(1 for l in lines if isinstance(l, dict) and l.get('executionCount', 0) > 0)}\n")
-                          
-                          out.write("end_of_record\n")
-              
-              print("✅ LCOV conversion successful")
-              sys.exit(0)
-          except Exception as e:
-              import traceback
-              print(f"❌ Conversion failed: {e}")
-              traceback.print_exc()
-              sys.exit(1)
+                          out.write(f"FNF:{len(functions)}\n")
+                          out.write(f"FNH:{sum(1 for f in functions if f.get('executionCount', 0) > 0)}\n")
+                      
+                      # Lines - use executableLines and lineCoverage from file level
+                      executable_lines = file_data.get("executableLines", 0)
+                      line_coverage = file_data.get("lineCoverage", 0.0)
+                      
+                      if executable_lines > 0:
+                          covered = int(executable_lines * line_coverage)
+                          out.write(f"LF:{executable_lines}\n")
+                          out.write(f"LH:{covered}\n")
+                      
+                      out.write("end_of_record\n")
+          
+          print("✅ Coverage report generated")
           PYEOF
           
-          if [ -f "coverage.lcov" ]; then
-            echo "✅ coverage.lcov generated"
-            echo "File size: $(wc -c < coverage.lcov) bytes"
-            echo "Lines in file: $(wc -l < coverage.lcov)"
-            echo ""
-            echo "First 20 lines of LCOV:"
-            head -20 coverage.lcov
-          else
-            echo "❌ coverage.lcov not generated"
-            exit 1
-          fi
+          echo "✅ LCOV file generated"
+          echo "Preview:"
+          head -30 coverage.lcov
 
       - name: Calculate Coverage
         id: coverage
         if: always()
         run: |
-          echo "📊 Calculating coverage..."
-          
           if [ ! -f "coverage.lcov" ]; then
-            echo "❌ coverage.lcov not found"
             echo "TOTAL_COVERAGE=N/A" >> $GITHUB_OUTPUT
             echo "SUCCESS=false" >> $GITHUB_OUTPUT
             exit 0
@@ -229,56 +157,31 @@ jobs:
           LH=$(grep "^LH:" coverage.lcov | awk -F: '{sum+=$2} END {print sum+0}')
           LF=$(grep "^LF:" coverage.lcov | awk -F: '{sum+=$2} END {print sum+0}')
           
-          echo "Lines Hit (LH): $LH"
-          echo "Lines Found (LF): $LF"
+          echo "Lines Hit: $LH"
+          echo "Lines Found: $LF"
           
           if [ "$LF" -gt 0 ]; then
             COVERAGE=$(awk "BEGIN {printf \"%.2f\", ($LH/$LF)*100}")
             echo "TOTAL_COVERAGE=${COVERAGE}%" >> $GITHUB_OUTPUT
-            echo "COVERAGE_PERCENT=${COVERAGE}" >> $GITHUB_OUTPUT
             echo "SUCCESS=true" >> $GITHUB_OUTPUT
             echo "✅ Coverage: ${COVERAGE}%"
           else
-            echo "⚠️  No lines found (LF=0)"
             echo "TOTAL_COVERAGE=0.00%" >> $GITHUB_OUTPUT
             echo "SUCCESS=false" >> $GITHUB_OUTPUT
           fi
-          
-          echo ""
-          echo "Output variables set:"
-          echo "  TOTAL_COVERAGE=$(grep TOTAL_COVERAGE $GITHUB_OUTPUT | cut -d= -f2)"
-          echo "  SUCCESS=$(grep SUCCESS $GITHUB_OUTPUT | cut -d= -f2)"
-
-      - name: Debug Coverage Outputs
-        if: always()
-        run: |
-          echo "🔍 Debugging coverage outputs..."
-          echo "SUCCESS value: '${{ steps.coverage.outputs.SUCCESS }}'"
-          echo "TOTAL_COVERAGE value: '${{ steps.coverage.outputs.TOTAL_COVERAGE }}'"
-          echo "Condition check: steps.coverage.outputs.SUCCESS == 'true' is ${{ steps.coverage.outputs.SUCCESS == 'true' }}"
 
       - name: Comment on PR
-        if: always()
+        if: steps.coverage.outputs.SUCCESS == 'true'
         uses: actions/github-script@v7
         with:
           script: |
-            const success = '${{ steps.coverage.outputs.SUCCESS }}';
             const coverage = '${{ steps.coverage.outputs.TOTAL_COVERAGE }}';
-            
-            console.log('Success:', success);
-            console.log('Coverage:', coverage);
-            
-            if (success === 'true' && coverage) {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.payload.pull_request.number,
-                body: `✅ Test Coverage: **${coverage}**`
-              });
-              console.log('✅ Coverage comment posted');
-            } else {
-              console.log('⚠️  Skipping comment - success:', success, 'coverage:', coverage);
-            }
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: `✅ Test Coverage: **${coverage}**`
+            });
 
       - name: Comment on Failure
         if: failure()
