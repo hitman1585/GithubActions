@@ -145,58 +145,58 @@ jobs:
           echo "TESTS_RAN=true" >> $GITHUB_OUTPUT
           
           echo "📊 Extracting test results..."
-          xcrun xcresulttool get --format json --path TestResults.xcresult > test_results.json
+          xcrun xcresulttool get --legacy --format json --path TestResults.xcresult > test_results.json
           
           cat > extract_failures.py << 'PYEOF'
-          import json
-          import sys
-          
-          try:
-              with open('test_results.json', 'r') as f:
-                  data = json.load(f)
-              
-              failures = []
-              
-              def extract_failures(obj, path=""):
-                  if isinstance(obj, dict):
-                      if obj.get('_type', {}).get('_name') == 'ActionTestSummary':
-                          test_status = obj.get('testStatus', {}).get('_value', '')
-                          if test_status == 'Failure':
-                              test_name = obj.get('name', {}).get('_value', 'Unknown')
-                              failure_summaries = obj.get('failureSummaries', {}).get('_values', [])
-                              reasons = []
-                              for fs in failure_summaries:
-                                  msg = fs.get('message', {}).get('_value', '')
-                                  if msg:
-                                      reasons.append(msg)
-                              failures.append({
-                                  'name': test_name,
-                                  'reason': ' | '.join(reasons) if reasons else 'No details'
-                              })
-                      
-                      for key, value in obj.items():
-                          extract_failures(value, f"{path}.{key}" if path else key)
-                  
-                  elif isinstance(obj, list):
-                      for item in obj:
-                          extract_failures(item, path)
-              
-              extract_failures(data)
-              
-              with open('failed_tests.json', 'w') as f:
-                  json.dump(failures, f, indent=2)
-              
-              if failures:
-                  print(f"❌ Found {len(failures)} failed test(s)")
-                  print("HAS_FAILURES=true")
-              else:
-                  print("✅ No test failures found in results")
-                  print("HAS_FAILURES=false")
-              
-          except Exception as e:
-              print(f"⚠️ Error extracting failures: {e}")
-              print("HAS_FAILURES=false")
-          PYEOF
+import json
+import sys
+
+try:
+    with open('test_results.json', 'r') as f:
+        data = json.load(f)
+    
+    failures = []
+    
+    def extract_failures(obj, path=""):
+        if isinstance(obj, dict):
+            if obj.get('_type', {}).get('_name') == 'ActionTestSummary':
+                test_status = obj.get('testStatus', {}).get('_value', '')
+                if test_status == 'Failure':
+                    test_name = obj.get('name', {}).get('_value', 'Unknown')
+                    failure_summaries = obj.get('failureSummaries', {}).get('_values', [])
+                    reasons = []
+                    for fs in failure_summaries:
+                        msg = fs.get('message', {}).get('_value', '')
+                        if msg:
+                            reasons.append(msg)
+                    failures.append({
+                        'name': test_name,
+                        'reason': ' | '.join(reasons) if reasons else 'No details'
+                    })
+            
+            for key, value in obj.items():
+                extract_failures(value, f"{path}.{key}" if path else key)
+        
+        elif isinstance(obj, list):
+            for item in obj:
+                extract_failures(item, path)
+    
+    extract_failures(data)
+    
+    with open('failed_tests.json', 'w') as f:
+        json.dump(failures, f, indent=2)
+    
+    if failures:
+        print(f"❌ Found {len(failures)} failed test(s)")
+        print("HAS_FAILURES=true")
+    else:
+        print("✅ No test failures found in results")
+        print("HAS_FAILURES=false")
+    
+except Exception as e:
+    print(f"⚠️ Error extracting failures: {e}")
+    print("HAS_FAILURES=false")
+PYEOF
           
           python3 extract_failures.py >> $GITHUB_OUTPUT
 
@@ -210,40 +210,40 @@ jobs:
           xcrun xccov view --report --json TestResults.xcresult > coverage.json
           
           cat > convert_coverage.py << 'PYEOF'
-          import json
-          
-          with open('coverage.json', 'r') as f:
-              coverage_data = json.load(f)
-          
-          with open('coverage.lcov', 'w') as lcov:
-              for target in coverage_data.get('targets', []):
-                  for file_data in target.get('files', []):
-                      file_path = file_data.get('path', '')
-                      lcov.write(f"SF:{file_path}\n")
-                      
-                      for func in file_data.get('functions', []):
-                          func_name = func.get('name', '')
-                          exec_count = func.get('executionCount', 0)
-                          line_number = func.get('lineNumber', 0)
-                          lcov.write(f"FN:{line_number},{func_name}\n")
-                          lcov.write(f"FNDA:{exec_count},{func_name}\n")
-                      
-                      lines_data = {}
-                      executable_lines = file_data.get('executableLines', 0)
-                      line_coverage = file_data.get('lineCoverage', 0.0)
-                      
-                      if executable_lines > 0:
-                          covered_lines = int(executable_lines * line_coverage)
-                          for i in range(1, executable_lines + 1):
-                              hit_count = 1 if i <= covered_lines else 0
-                              lcov.write(f"DA:{i},{hit_count}\n")
-                      
-                      lcov.write(f"LF:{executable_lines}\n")
-                      lcov.write(f"LH:{int(executable_lines * line_coverage)}\n")
-                      lcov.write("end_of_record\n")
-          
-          print("✅ Converted coverage to LCOV format")
-          PYEOF
+import json
+
+with open('coverage.json', 'r') as f:
+    coverage_data = json.load(f)
+
+with open('coverage.lcov', 'w') as lcov:
+    for target in coverage_data.get('targets', []):
+        for file_data in target.get('files', []):
+            file_path = file_data.get('path', '')
+            lcov.write(f"SF:{file_path}\n")
+            
+            for func in file_data.get('functions', []):
+                func_name = func.get('name', '')
+                exec_count = func.get('executionCount', 0)
+                line_number = func.get('lineNumber', 0)
+                lcov.write(f"FN:{line_number},{func_name}\n")
+                lcov.write(f"FNDA:{exec_count},{func_name}\n")
+            
+            lines_data = {}
+            executable_lines = file_data.get('executableLines', 0)
+            line_coverage = file_data.get('lineCoverage', 0.0)
+            
+            if executable_lines > 0:
+                covered_lines = int(executable_lines * line_coverage)
+                for i in range(1, executable_lines + 1):
+                    hit_count = 1 if i <= covered_lines else 0
+                    lcov.write(f"DA:{i},{hit_count}\n")
+            
+            lcov.write(f"LF:{executable_lines}\n")
+            lcov.write(f"LH:{int(executable_lines * line_coverage)}\n")
+            lcov.write("end_of_record\n")
+
+print("✅ Converted coverage to LCOV format")
+PYEOF
           
           python3 convert_coverage.py
 
@@ -260,65 +260,65 @@ jobs:
           fi
           
           cat > filter_coverage.py << 'PYEOF'
-          import yaml
-          import fnmatch
-          import os
-          
-          # Read ignore patterns
-          with open('ci_scripts/scripts/.xcodecov.yaml', 'r') as f:
-              config = yaml.safe_load(f)
-          
-          ignore_patterns = config.get('ignore', [])
-          print(f"📋 Loaded {len(ignore_patterns)} ignore patterns")
-          
-          # Read LCOV file
-          with open('coverage.lcov', 'r') as f:
-              lcov_lines = f.readlines()
-          
-          filtered_lines = []
-          current_file = None
-          skip_current = False
-          
-          for line in lcov_lines:
-              if line.startswith('SF:'):
-                  current_file = line[3:].strip()
-                  
-                  # Always exclude Pods
-                  if '/Pods/' in current_file:
-                      skip_current = True
-                      continue
-                  
-                  # Check against ignore patterns
-                  skip_current = False
-                  file_basename = os.path.basename(current_file)
-                  
-                  for pattern in ignore_patterns:
-                      # Match against full path
-                      if fnmatch.fnmatch(current_file, pattern):
-                          skip_current = True
-                          break
-                      # Match against basename
-                      if fnmatch.fnmatch(file_basename, pattern):
-                          skip_current = True
-                          break
-                      # Match patterns like **/pattern
-                      if pattern.startswith('**/'):
-                          simple_pattern = pattern[3:]
-                          if fnmatch.fnmatch(file_basename, simple_pattern):
-                              skip_current = True
-                              break
-                  
-                  if not skip_current:
-                      filtered_lines.append(line)
-              elif not skip_current:
-                  filtered_lines.append(line)
-          
-          # Write filtered LCOV
-          with open('coverage_filtered.lcov', 'w') as f:
-              f.writelines(filtered_lines)
-          
-          print(f"✅ Filtered coverage: {len([l for l in lcov_lines if l.startswith('SF:')])} → {len([l for l in filtered_lines if l.startswith('SF:')])} files")
-          PYEOF
+import yaml
+import fnmatch
+import os
+
+# Read ignore patterns
+with open('ci_scripts/scripts/.xcodecov.yaml', 'r') as f:
+    config = yaml.safe_load(f)
+
+ignore_patterns = config.get('ignore', [])
+print(f"📋 Loaded {len(ignore_patterns)} ignore patterns")
+
+# Read LCOV file
+with open('coverage.lcov', 'r') as f:
+    lcov_lines = f.readlines()
+
+filtered_lines = []
+current_file = None
+skip_current = False
+
+for line in lcov_lines:
+    if line.startswith('SF:'):
+        current_file = line[3:].strip()
+        
+        # Always exclude Pods
+        if '/Pods/' in current_file:
+            skip_current = True
+            continue
+        
+        # Check against ignore patterns
+        skip_current = False
+        file_basename = os.path.basename(current_file)
+        
+        for pattern in ignore_patterns:
+            # Match against full path
+            if fnmatch.fnmatch(current_file, pattern):
+                skip_current = True
+                break
+            # Match against basename
+            if fnmatch.fnmatch(file_basename, pattern):
+                skip_current = True
+                break
+            # Match patterns like **/pattern
+            if pattern.startswith('**/'):
+                simple_pattern = pattern[3:]
+                if fnmatch.fnmatch(file_basename, simple_pattern):
+                    skip_current = True
+                    break
+        
+        if not skip_current:
+            filtered_lines.append(line)
+    elif not skip_current:
+        filtered_lines.append(line)
+
+# Write filtered LCOV
+with open('coverage_filtered.lcov', 'w') as f:
+    f.writelines(filtered_lines)
+
+print(f"✅ Filtered coverage: {len([l for l in lcov_lines if l.startswith('SF:')])} → {len([l for l in filtered_lines if l.startswith('SF:')])} files")
+PYEOF
           
           python3 filter_coverage.py
 
