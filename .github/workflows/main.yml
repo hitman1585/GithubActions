@@ -18,70 +18,98 @@ jobs:
       github.event.pull_request.base.ref == 'main' &&
       contains(github.event.pull_request.labels.*.name, 'run_ci') &&
       github.event.pull_request.head.repo.full_name == github.repository
+    
     runs-on: macos-latest
     timeout-minutes: 45
 
     steps:
-      - name: Checkout
+      # ----------------------- Checkout ----------------------- #
+      - name: Checkout PR Branch
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.pull_request.head.ref }}
           fetch-depth: 1
 
+      # ----------------------- Setup Latest Stable Xcode ----------------------- #
       - name: Setup Latest Stable Xcode
         run: |
-          if [ -d "/Applications/Xcode.app" ]; then
-            SELECTED_XCODE="Xcode.app"
+          echo "🔍 Finding latest stable Xcode..."
+          
+          # Find latest stable Xcode (excluding betas, RCs, previews, GM seeds)
+          LATEST_XCODE=$(ls /Applications | \
+            grep "Xcode" | \
+            grep -v -i "beta" | \
+            grep -v -i "RC" | \
+            grep -v -i "preview" | \
+            grep -v -i "GM_seed" | \
+            sort -V | \
+            tail -1)
+          
+          if [ -n "$LATEST_XCODE" ]; then
+            sudo xcode-select -s "/Applications/${LATEST_XCODE}/Contents/Developer"
+            echo "✅ Using ${LATEST_XCODE}"
           else
-            SELECTED_XCODE=$(ls /Applications | grep "^Xcode" | grep -v -i beta | grep -v -i "RC" | grep -v -i preview | sort -V | tail -1)
+            echo "⚠️ No stable Xcode found, using system default"
           fi
           
-          sudo xcode-select -s /Applications/$SELECTED_XCODE/Contents/Developer
           xcodebuild -version
 
+      # ----------------------- Setup Python ----------------------- #
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
+      # ----------------------- Install PyYAML ----------------------- #
       - name: Install PyYAML
         run: pip install pyyaml
 
+      # ----------------------- Find or Create Simulator ----------------------- #
       - name: Find Available Simulator
         id: simulator
         run: |
-          RUNTIME=$(xcrun simctl list runtimes iOS -j | jq -r '.runtimes | map(select(.isAvailable == true)) | sort_by(.version) | last | .identifier')
-          DEVICE_UDID=$(xcrun simctl list devices -j | jq -r --arg runtime "$RUNTIME" '.devices[$runtime] | .[]? | select(.name | contains("iPhone")) | .udid' | head -1)
+          set -e
+          
+          echo "🔍 Finding available iOS runtime..."
+          RUNTIME=$(xcrun simctl list runtimes iOS -j | \
+            jq -r '.runtimes | sort_by(.version) | last | .identifier')
+          
+          echo "📱 Runtime: $RUNTIME"
+          
+          echo "🔍 Looking for existing iPhone simulator..."
+          DEVICE_UDID=$(xcrun simctl list devices -j | \
+            jq -r --arg runtime "$RUNTIME" \
+            '.devices[$runtime] // [] | 
+             map(select(.name | contains("iPhone"))) | 
+             .[0].udid // empty')
           
           if [ -z "$DEVICE_UDID" ]; then
-            DEVICE_TYPE=$(xcrun simctl list devicetypes -j | jq -r '.devicetypes | map(select(.name | contains("iPhone"))) | last | .identifier')
+            echo "📱 Creating new simulator..."
+            DEVICE_TYPE=$(xcrun simctl list devicetypes -j | \
+              jq -r '.devicetypes | map(select(.name | contains("iPhone"))) | last | .identifier')
             DEVICE_UDID=$(xcrun simctl create "CI-iPhone" "$DEVICE_TYPE" "$RUNTIME")
+            echo "✅ Created simulator: $DEVICE_UDID"
+          else
+            echo "✅ Found existing simulator: $DEVICE_UDID"
           fi
           
-          xcrun simctl boot "$DEVICE_UDID" 2>/dev/null || true
-          sleep 3
+          echo "🚀 Booting simulator..."
+          xcrun simctl boot "$DEVICE_UDID" || echo "Simulator already booted"
           
           echo "DEVICE_UDID=$DEVICE_UDID" >> $GITHUB_OUTPUT
 
+      # ----------------------- Run All Module Tests ----------------------- #
       - name: Run All Module Tests
+        id: run_tests
+        continue-on-error: true
         env:
           SCHEME: "GithubActions"
           DEVICE_UDID: ${{ steps.simulator.outputs.DEVICE_UDID }}
         run: |
-          echo "🧪 Running ALL module tests..."
-          echo "This includes:"
-          echo "  - CheckoutTests"
-          echo "  - HelpCentreKitImplTests"
-          echo "  - LoginModuleTests"
-          echo "  - MAnalyticsTests"
-          echo "  - MeeshoCommonTests"
-          echo "  - And any other test targets"
-          echo ""
+          set +e
           
           START_TIME=$(date +%s)
           
-          # Run all tests (no -only-testing filter)
-          # This will run all test bundles in the scheme
           xcodebuild test \
             -workspace GithubActions.xcworkspace \
             -scheme "$SCHEME" \
@@ -91,281 +119,319 @@ jobs:
             -resultBundlePath TestResults.xcresult \
             -derivedDataPath DerivedData \
             CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO
+            CODE_SIGNING_REQUIRED=NO \
+            2>&1 | tee test_output.log
           
+          TEST_EXIT_CODE=${PIPESTATUS[0]}
           END_TIME=$(date +%s)
-          echo ""
-          echo "✅ All tests completed in $((END_TIME - START_TIME)) seconds"
+          DURATION=$((END_TIME - START_TIME))
+          
+          echo "TEST_EXIT_CODE=$TEST_EXIT_CODE" >> $GITHUB_OUTPUT
+          echo "TEST_DURATION=${DURATION}s" >> $GITHUB_OUTPUT
+          
+          exit $TEST_EXIT_CODE
 
-      - name: Generate Project-Wide Coverage Report
-        if: always()
+      # ----------------------- Extract Failed Test Details ----------------------- #
+      - name: Extract Failed Test Details
+        id: test_results
+        if: always() && steps.run_tests.outputs.TEST_EXIT_CODE != '0'
         run: |
           if [ ! -d "TestResults.xcresult" ]; then
-            echo "❌ No TestResults.xcresult"
-            exit 1
+            echo "⚠️ No test results found"
+            echo "TESTS_RAN=false" >> $GITHUB_OUTPUT
+            exit 0
           fi
           
-          echo "📊 Generating project-wide coverage report..."
+          echo "TESTS_RAN=true" >> $GITHUB_OUTPUT
+          
+          echo "📊 Extracting test results..."
+          xcrun xcresulttool get --format json --path TestResults.xcresult > test_results.json
+          
+          cat > extract_failures.py << 'PYEOF'
+          import json
+          import sys
+          
+          try:
+              with open('test_results.json', 'r') as f:
+                  data = json.load(f)
+              
+              failures = []
+              
+              def extract_failures(obj, path=""):
+                  if isinstance(obj, dict):
+                      if obj.get('_type', {}).get('_name') == 'ActionTestSummary':
+                          test_status = obj.get('testStatus', {}).get('_value', '')
+                          if test_status == 'Failure':
+                              test_name = obj.get('name', {}).get('_value', 'Unknown')
+                              failure_summaries = obj.get('failureSummaries', {}).get('_values', [])
+                              reasons = []
+                              for fs in failure_summaries:
+                                  msg = fs.get('message', {}).get('_value', '')
+                                  if msg:
+                                      reasons.append(msg)
+                              failures.append({
+                                  'name': test_name,
+                                  'reason': ' | '.join(reasons) if reasons else 'No details'
+                              })
+                      
+                      for key, value in obj.items():
+                          extract_failures(value, f"{path}.{key}" if path else key)
+                  
+                  elif isinstance(obj, list):
+                      for item in obj:
+                          extract_failures(item, path)
+              
+              extract_failures(data)
+              
+              with open('failed_tests.json', 'w') as f:
+                  json.dump(failures, f, indent=2)
+              
+              if failures:
+                  print(f"❌ Found {len(failures)} failed test(s)")
+                  print("HAS_FAILURES=true")
+              else:
+                  print("✅ No test failures found in results")
+                  print("HAS_FAILURES=false")
+              
+          except Exception as e:
+              print(f"⚠️ Error extracting failures: {e}")
+              print("HAS_FAILURES=false")
+          PYEOF
+          
+          python3 extract_failures.py >> $GITHUB_OUTPUT
+
+      # ----------------------- Generate Project-Wide Coverage Report ----------------------- #
+      - name: Generate Project-Wide Coverage Report
+        if: always() && steps.test_results.outputs.TESTS_RAN == 'true'
+        run: |
+          set -e
+          
+          echo "📊 Generating coverage report..."
           xcrun xccov view --report --json TestResults.xcresult > coverage.json
           
-          echo ""
-          echo "📊 Coverage Summary by Target:"
-          cat coverage.json | jq -r '.targets[] | "\(.name): \(.lineCoverage * 100 | floor)% (\(.coveredLines)/\(.executableLines) lines)"'
-          
-          echo ""
-          echo "📊 Total project coverage (before filtering):"
-          cat coverage.json | jq '{coveredLines: .coveredLines, executableLines: .executableLines, lineCoverage: (.lineCoverage * 100)}'
-          
-          echo ""
-          echo "📊 Converting to LCOV format..."
-          
-          python3 << 'PYEOF'
+          cat > convert_coverage.py << 'PYEOF'
           import json
           
-          with open("coverage.json") as f:
-              data = json.load(f)
+          with open('coverage.json', 'r') as f:
+              coverage_data = json.load(f)
           
-          total_files = 0
-          
-          with open("coverage.lcov", "w") as out:
-              for target in data.get("targets", []):
-                  target_name = target.get("name", "")
-                  
-                  for file_data in target.get("files", []):
-                      path = file_data.get("path", "")
-                      if not path:
-                          continue
+          with open('coverage.lcov', 'w') as lcov:
+              for target in coverage_data.get('targets', []):
+                  for file_data in target.get('files', []):
+                      file_path = file_data.get('path', '')
+                      lcov.write(f"SF:{file_path}\n")
                       
-                      total_files += 1
+                      for func in file_data.get('functions', []):
+                          func_name = func.get('name', '')
+                          exec_count = func.get('executionCount', 0)
+                          line_number = func.get('lineNumber', 0)
+                          lcov.write(f"FN:{line_number},{func_name}\n")
+                          lcov.write(f"FNDA:{exec_count},{func_name}\n")
                       
-                      out.write(f"TN:{target_name}\n")
-                      out.write(f"SF:{path}\n")
-                      
-                      # Functions
-                      functions = file_data.get("functions", [])
-                      if isinstance(functions, list):
-                          for func in functions:
-                              name = func.get("name", "")
-                              line = func.get("lineNumber", 0)
-                              if name and line:
-                                  out.write(f"FN:{line},{name}\n")
-                          
-                          for func in functions:
-                              name = func.get("name", "")
-                              count = func.get("executionCount", 0)
-                              if name:
-                                  out.write(f"FNDA:{count},{name}\n")
-                          
-                          out.write(f"FNF:{len(functions)}\n")
-                          out.write(f"FNH:{sum(1 for f in functions if f.get('executionCount', 0) > 0)}\n")
-                      
-                      # Lines
-                      executable_lines = file_data.get("executableLines", 0)
-                      line_coverage = file_data.get("lineCoverage", 0.0)
+                      lines_data = {}
+                      executable_lines = file_data.get('executableLines', 0)
+                      line_coverage = file_data.get('lineCoverage', 0.0)
                       
                       if executable_lines > 0:
-                          covered = int(executable_lines * line_coverage)
-                          out.write(f"LF:{executable_lines}\n")
-                          out.write(f"LH:{covered}\n")
+                          covered_lines = int(executable_lines * line_coverage)
+                          for i in range(1, executable_lines + 1):
+                              hit_count = 1 if i <= covered_lines else 0
+                              lcov.write(f"DA:{i},{hit_count}\n")
                       
-                      out.write("end_of_record\n")
+                      lcov.write(f"LF:{executable_lines}\n")
+                      lcov.write(f"LH:{int(executable_lines * line_coverage)}\n")
+                      lcov.write("end_of_record\n")
           
-          print(f"✅ Generated LCOV for {total_files} files")
+          print("✅ Converted coverage to LCOV format")
           PYEOF
+          
+          python3 convert_coverage.py
 
+      # ----------------------- Filter Coverage using .xcodecov.yaml ----------------------- #
       - name: Filter Coverage using .xcodecov.yaml
-        if: always()
+        if: always() && steps.test_results.outputs.TESTS_RAN == 'true'
         run: |
-          echo "🔍 ===== COVERAGE FILTERING ====="
-          echo ""
+          set -e
           
-          CONFIG_FILE="ci_scripts/scripts/.xcodecov.yaml"
-          
-          if [ -f "$CONFIG_FILE" ]; then
-            echo "✅ Found configuration file: $CONFIG_FILE"
-            echo ""
-            echo "📄 Exclusion patterns (first 20):"
-            head -20 "$CONFIG_FILE"
-            echo "..."
-          else
-            echo "❌ Configuration file not found: $CONFIG_FILE"
-            exit 1
+          if [ ! -f "ci_scripts/scripts/.xcodecov.yaml" ]; then
+            echo "⚠️ .xcodecov.yaml not found, using unfiltered coverage"
+            cp coverage.lcov coverage_filtered.lcov
+            exit 0
           fi
           
-          # Show stats BEFORE filtering
-          echo ""
-          echo "📊 BEFORE Filtering:"
-          BEFORE_FILES=$(grep -c "^SF:" coverage.lcov)
-          BEFORE_LF=$(grep "^LF:" coverage.lcov | awk -F: '{sum+=$2} END {print sum+0}')
-          BEFORE_LH=$(grep "^LH:" coverage.lcov | awk -F: '{sum+=$2} END {print sum+0}')
-          BEFORE_COV=$(awk "BEGIN {printf \"%.2f\", ($BEFORE_LH/$BEFORE_LF)*100}")
-          
-          echo "  Files: $BEFORE_FILES"
-          echo "  Lines: $BEFORE_LH / $BEFORE_LF ($BEFORE_COV%)"
-          
-          # Apply filtering
-          python3 << 'PYEOF'
+          cat > filter_coverage.py << 'PYEOF'
           import yaml
-          import re
+          import fnmatch
           import os
           
-          config_file = "ci_scripts/scripts/.xcodecov.yaml"
-          
-          print(f"\n🚫 Loading exclusion patterns from {config_file}...")
-          
-          with open(config_file, 'r') as f:
+          # Read ignore patterns
+          with open('ci_scripts/scripts/.xcodecov.yaml', 'r') as f:
               config = yaml.safe_load(f)
           
           ignore_patterns = config.get('ignore', [])
-          print(f"   Found {len(ignore_patterns)} exclusion patterns")
+          print(f"📋 Loaded {len(ignore_patterns)} ignore patterns")
           
-          # Read LCOV
-          with open("coverage.lcov", "r") as f:
-              content = f.read()
+          # Read LCOV file
+          with open('coverage.lcov', 'r') as f:
+              lcov_lines = f.readlines()
           
-          blocks = content.split("end_of_record\n")
+          filtered_lines = []
+          current_file = None
+          skip_current = False
           
-          filtered_blocks = []
-          included_count = 0
-          excluded_count = 0
-          excluded_by_pattern = {}
-          
-          for block in blocks:
-              if not block.strip():
-                  continue
-              
-              # Extract file path
-              sf_line = None
-              for line in block.strip().split("\n"):
-                  if line.startswith("SF:"):
-                      sf_line = line[3:]
-                      break
-              
-              if not sf_line:
-                  continue
-              
-              # Check against all patterns
-              exclude = False
-              matched_pattern = None
-              
-              # Exclude Pods
-              if "/Pods/" in sf_line or "/Pods\\" in sf_line:
-                  exclude = True
-                  matched_pattern = "Pods"
-              
-              # Check YAML patterns
-              if not exclude:
+          for line in lcov_lines:
+              if line.startswith('SF:'):
+                  current_file = line[3:].strip()
+                  
+                  # Always exclude Pods
+                  if '/Pods/' in current_file:
+                      skip_current = True
+                      continue
+                  
+                  # Check against ignore patterns
+                  skip_current = False
+                  file_basename = os.path.basename(current_file)
+                  
                   for pattern in ignore_patterns:
-                      # Convert glob to regex
-                      regex_pattern = pattern.replace('**/', '').replace('*', '.*').replace('?', '.')
-                      if re.search(regex_pattern, sf_line):
-                          exclude = True
-                          matched_pattern = pattern
+                      # Match against full path
+                      if fnmatch.fnmatch(current_file, pattern):
+                          skip_current = True
                           break
-              
-              if exclude:
-                  excluded_count += 1
-                  if matched_pattern not in excluded_by_pattern:
-                      excluded_by_pattern[matched_pattern] = []
-                  excluded_by_pattern[matched_pattern].append(sf_line)
-              else:
-                  included_count += 1
-                  filtered_blocks.append(block.strip() + "\nend_of_record\n")
+                      # Match against basename
+                      if fnmatch.fnmatch(file_basename, pattern):
+                          skip_current = True
+                          break
+                      # Match patterns like **/pattern
+                      if pattern.startswith('**/'):
+                          simple_pattern = pattern[3:]
+                          if fnmatch.fnmatch(file_basename, simple_pattern):
+                              skip_current = True
+                              break
+                  
+                  if not skip_current:
+                      filtered_lines.append(line)
+              elif not skip_current:
+                  filtered_lines.append(line)
           
           # Write filtered LCOV
-          with open("coverage_filtered.lcov", "w") as f:
-              f.write("\n".join(filtered_blocks))
+          with open('coverage_filtered.lcov', 'w') as f:
+              f.writelines(filtered_lines)
           
-          print(f"\n📊 Filtering Results:")
-          print(f"   ✅ Included: {included_count} files")
-          print(f"   ❌ Excluded: {excluded_count} files")
-          
-          print(f"\n📋 Exclusions by pattern (top 10):")
-          sorted_patterns = sorted(excluded_by_pattern.items(), key=lambda x: len(x[1]), reverse=True)
-          for pattern, files in sorted_patterns[:10]:
-              print(f"   {pattern}: {len(files)} files")
+          print(f"✅ Filtered coverage: {len([l for l in lcov_lines if l.startswith('SF:')])} → {len([l for l in filtered_lines if l.startswith('SF:')])} files")
           PYEOF
           
-          # Show stats AFTER filtering
-          echo ""
-          echo "📊 AFTER Filtering:"
-          AFTER_FILES=$(grep -c "^SF:" coverage_filtered.lcov 2>/dev/null || echo 0)
-          AFTER_LF=$(grep "^LF:" coverage_filtered.lcov 2>/dev/null | awk -F: '{sum+=$2} END {print sum+0}')
-          AFTER_LH=$(grep "^LH:" coverage_filtered.lcov 2>/dev/null | awk -F: '{sum+=$2} END {print sum+0}')
-          AFTER_COV=$(awk "BEGIN {printf \"%.2f\", ($AFTER_LH/$AFTER_LF)*100}")
-          
-          echo "  Files: $AFTER_FILES"
-          echo "  Lines: $AFTER_LH / $AFTER_LF ($AFTER_COV%)"
-          
-          echo ""
-          echo "📊 Filter Impact:"
-          echo "  Files removed: $((BEFORE_FILES - AFTER_FILES))"
-          echo "  Lines removed: $((BEFORE_LF - AFTER_LF))"
-          echo "  Coverage change: $BEFORE_COV% → $AFTER_COV%"
-          echo ""
-          echo "===== FILTERING COMPLETE ====="
+          python3 filter_coverage.py
 
+      # ----------------------- Calculate Final Coverage ----------------------- #
       - name: Calculate Final Coverage
         id: coverage
-        if: always()
+        if: always() && steps.test_results.outputs.TESTS_RAN == 'true'
         run: |
+          set -e
+          
           if [ ! -f "coverage_filtered.lcov" ]; then
-            echo "❌ No filtered coverage file"
-            echo "TOTAL_COVERAGE=N/A" >> $GITHUB_OUTPUT
+            echo "❌ coverage_filtered.lcov not found"
             echo "SUCCESS=false" >> $GITHUB_OUTPUT
             exit 0
           fi
           
           LH=$(grep "^LH:" coverage_filtered.lcov | awk -F: '{sum+=$2} END {print sum+0}')
           LF=$(grep "^LF:" coverage_filtered.lcov | awk -F: '{sum+=$2} END {print sum+0}')
-          FILES=$(grep -c "^SF:" coverage_filtered.lcov)
+          FILES=$(grep -c "^SF:" coverage_filtered.lcov || echo "0")
           
-          echo "📊 Final Project-Wide Coverage:"
-          echo "  Files analyzed: $FILES"
+          echo "📊 Coverage Stats:"
+          echo "  Files: $FILES"
           echo "  Lines Hit: $LH"
-          echo "  Lines Found: $LF"
+          echo "  Lines Total: $LF"
           
           if [ "$LF" -gt 0 ]; then
             COVERAGE=$(awk "BEGIN {printf \"%.2f\", ($LH/$LF)*100}")
-            echo "TOTAL_COVERAGE=${COVERAGE}%" >> $GITHUB_OUTPUT
+            echo "TOTAL_COVERAGE=${COVERAGE}" >> $GITHUB_OUTPUT
             echo "FILES_ANALYZED=$FILES" >> $GITHUB_OUTPUT
             echo "LINES_HIT=$LH" >> $GITHUB_OUTPUT
             echo "LINES_TOTAL=$LF" >> $GITHUB_OUTPUT
             echo "SUCCESS=true" >> $GITHUB_OUTPUT
-            echo ""
-            echo "🎯 Total Coverage: ${COVERAGE}%"
+            echo "✅ Total Coverage: ${COVERAGE}%"
           else
-            echo "TOTAL_COVERAGE=0.00%" >> $GITHUB_OUTPUT
+            echo "TOTAL_COVERAGE=0" >> $GITHUB_OUTPUT
             echo "SUCCESS=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Comment on PR
-        if: steps.coverage.outputs.SUCCESS == 'true'
+      # ----------------------- Comment on PR - Tests Passed ----------------------- #
+      - name: Comment on PR - Tests Passed
+        if: steps.coverage.outputs.SUCCESS == 'true' && steps.run_tests.outputs.TEST_EXIT_CODE == '0'
         uses: actions/github-script@v7
         with:
           script: |
             const coverage = '${{ steps.coverage.outputs.TOTAL_COVERAGE }}';
-            const files = '${{ steps.coverage.outputs.FILES_ANALYZED }}';
+            const filesAnalyzed = '${{ steps.coverage.outputs.FILES_ANALYZED }}';
             const linesHit = '${{ steps.coverage.outputs.LINES_HIT }}';
             const linesTotal = '${{ steps.coverage.outputs.LINES_TOTAL }}';
             
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.payload.pull_request.number,
-              body: '## 📊 Test Coverage Report\n\n**Total Coverage:** **' + coverage + '**\n\n**Details:**\n- 📁 Files Analyzed: ' + files + '\n- ✅ Lines Covered: ' + linesHit + '\n- 📝 Total Lines: ' + linesTotal + '\n\n*Coverage calculated after excluding files per .xcodecov.yaml configuration*'
-            });
-
-      - name: Comment on Failure
-        if: failure()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = `### ✅ Tests Passed
+            
+            **Test Coverage: ${coverage}%**
+            
+            📊 Coverage Details:
+            - Files Analyzed: ${filesAnalyzed}
+            - Lines Covered: ${linesHit}/${linesTotal}`;
             
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.payload.pull_request.number,
-              body: `❌ Coverage check failed. [View logs](${runUrl})`
+              body: body
             });
+
+      # ----------------------- Comment on PR - Tests Failed ----------------------- #
+      - name: Comment on PR - Tests Failed
+        if: steps.run_tests.outputs.TEST_EXIT_CODE != '0'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            
+            let body = '### ❌ Tests Failed\n\n';
+            
+            // Add failed test details
+            if (fs.existsSync('failed_tests.json')) {
+              const failures = JSON.parse(fs.readFileSync('failed_tests.json', 'utf8'));
+              
+              if (failures.length > 0) {
+                body += '#### Failed Tests:\n\n';
+                const displayCount = Math.min(failures.length, 10);
+                
+                for (let i = 0; i < displayCount; i++) {
+                  const test = failures[i];
+                  body += `**${i + 1}. ${test.name}**\n`;
+                  body += `   Reason: ${test.reason}\n\n`;
+                }
+                
+                if (failures.length > 10) {
+                  body += `_... and ${failures.length - 10} more failures_\n\n`;
+                }
+              }
+            }
+            
+            // Add coverage if available
+            const coverage = '${{ steps.coverage.outputs.TOTAL_COVERAGE }}';
+            if (coverage && coverage !== '0') {
+              body += `\n📊 **Coverage: ${coverage}%**\n\n`;
+            }
+            
+            body += `[View Full Logs](${runUrl})`;
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: body
+            });
+
+      # ----------------------- Fail Workflow if Tests Failed ----------------------- #
+      - name: Fail Workflow if Tests Failed
+        if: steps.run_tests.outputs.TEST_EXIT_CODE != '0'
+        run: |
+          echo "❌ Tests failed with exit code ${{ steps.run_tests.outputs.TEST_EXIT_CODE }}"
+          exit 1
