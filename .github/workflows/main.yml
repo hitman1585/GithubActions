@@ -133,7 +133,7 @@ jobs:
       # ----------------------- Extract Failed Test Details ----------------------- #
       - name: Extract Failed Test Details
         id: test_results
-        if: always() && steps.run_tests.outputs.TEST_EXIT_CODE != '0'
+        if: always()
         run: |
           if [ ! -d "TestResults.xcresult" ]; then
             echo "⚠️ No test results found"
@@ -143,61 +143,75 @@ jobs:
           
           echo "TESTS_RAN=true" >> $GITHUB_OUTPUT
           
-          echo "📊 Extracting test results..."
-          xcrun xcresulttool get --legacy --format json --path TestResults.xcresult > test_results.json
-          
-          cat > extract_failures.py << 'EOF'
+          if [ "${{ steps.run_tests.outputs.TEST_EXIT_CODE }}" != "0" ]; then
+            echo "📊 Extracting failed test details from output..."
+            
+            cat > extract_failures.py << 'EOF'
+          import re
           import json
-          import sys
+          
+          failures = []
           
           try:
-              with open('test_results.json', 'r') as f:
-                  data = json.load(f)
+              with open('test_output.log', 'r') as f:
+                  log_content = f.read()
               
-              failures = []
+              # Pattern to match test failures
+              # Example: Test Case '-[ModuleTests.TestClass testMethod]' failed
+              failure_pattern = r"Test Case '-\[([^\]]+)\]' failed.*?\n(.*?)(?=Test Case|$)"
               
-              def extract_failures(obj, path=""):
-                  if isinstance(obj, dict):
-                      if obj.get('_type', {}).get('_name') == 'ActionTestSummary':
-                          test_status = obj.get('testStatus', {}).get('_value', '')
-                          if test_status == 'Failure':
-                              test_name = obj.get('name', {}).get('_value', 'Unknown')
-                              failure_summaries = obj.get('failureSummaries', {}).get('_values', [])
-                              reasons = []
-                              for fs in failure_summaries:
-                                  msg = fs.get('message', {}).get('_value', '')
-                                  if msg:
-                                      reasons.append(msg)
-                              failures.append({
-                                  'name': test_name,
-                                  'reason': ' | '.join(reasons) if reasons else 'No details'
-                              })
-                      
-                      for key, value in obj.items():
-                          extract_failures(value, f"{path}.{key}" if path else key)
+              matches = re.finditer(failure_pattern, log_content, re.DOTALL)
+              
+              for match in matches:
+                  test_name = match.group(1)
+                  context = match.group(2)[:500]  # First 500 chars of context
                   
-                  elif isinstance(obj, list):
-                      for item in obj:
-                          extract_failures(item, path)
+                  # Try to extract assertion failure message
+                  assertion_match = re.search(r'failed: (.+)', context)
+                  if assertion_match:
+                      reason = assertion_match.group(1).strip()
+                  else:
+                      # Try to find XCTAssert messages
+                      assert_match = re.search(r'XCTAssert[^:]+: (.+)', context)
+                      if assert_match:
+                          reason = assert_match.group(1).strip()
+                      else:
+                          reason = "Test failed - check logs for details"
+                  
+                  failures.append({
+                      'name': test_name,
+                      'reason': reason[:200]  # Limit reason length
+                  })
               
-              extract_failures(data)
+              # Remove duplicates
+              unique_failures = []
+              seen = set()
+              for f in failures:
+                  if f['name'] not in seen:
+                      unique_failures.append(f)
+                      seen.add(f['name'])
               
               with open('failed_tests.json', 'w') as f:
-                  json.dump(failures, f, indent=2)
+                  json.dump(unique_failures, f, indent=2)
               
-              if failures:
-                  print(f"❌ Found {len(failures)} failed test(s)")
+              if unique_failures:
+                  print(f"❌ Found {len(unique_failures)} failed test(s)")
                   print("HAS_FAILURES=true")
               else:
-                  print("✅ No test failures found in results")
+                  print("✅ No test failures extracted")
                   print("HAS_FAILURES=false")
-              
+          
           except Exception as e:
               print(f"⚠️ Error extracting failures: {e}")
               print("HAS_FAILURES=false")
+              with open('failed_tests.json', 'w') as f:
+                  json.dump([], f)
           EOF
-          
-          python3 extract_failures.py >> $GITHUB_OUTPUT
+            
+            python3 extract_failures.py >> $GITHUB_OUTPUT
+          else
+            echo "HAS_FAILURES=false" >> $GITHUB_OUTPUT
+          fi
 
       # ----------------------- Generate Project-Wide Coverage Report ----------------------- #
       - name: Generate Project-Wide Coverage Report
