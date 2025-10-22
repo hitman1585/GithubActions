@@ -64,8 +64,6 @@ jobs:
           echo "DEVICE_UDID=$DEVICE_UDID" >> $GITHUB_OUTPUT
 
       - name: Run All Module Tests
-        id: run_tests
-        continue-on-error: true
         env:
           SCHEME: "GithubActions"
           DEVICE_UDID: ${{ steps.simulator.outputs.DEVICE_UDID }}
@@ -82,7 +80,8 @@ jobs:
           
           START_TIME=$(date +%s)
           
-          set +e
+          # Run all tests (no -only-testing filter)
+          # This will run all test bundles in the scheme
           xcodebuild test \
             -workspace GithubActions.xcworkspace \
             -scheme "$SCHEME" \
@@ -92,87 +91,11 @@ jobs:
             -resultBundlePath TestResults.xcresult \
             -derivedDataPath DerivedData \
             CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            2>&1 | tee test_output.log
+            CODE_SIGNING_REQUIRED=NO
           
-          TEST_EXIT_CODE=${PIPESTATUS[0]}
           END_TIME=$(date +%s)
-          
           echo ""
-          echo "✅ Tests completed in $((END_TIME - START_TIME)) seconds"
-          echo "TEST_EXIT_CODE=$TEST_EXIT_CODE" >> $GITHUB_OUTPUT
-          
-          exit $TEST_EXIT_CODE
-
-      - name: Extract Failed Test Details
-        if: always() && steps.run_tests.outputs.TEST_EXIT_CODE != '0'
-        run: |
-          echo "📊 Extracting failed test details..."
-          
-          python3 << 'EOF'
-          import re
-          import json
-          
-          failures = []
-          
-          try:
-              with open('test_output.log', 'r') as f:
-                  content = f.read()
-              
-              # Pattern 1: Test Case '-[ClassName testMethod]' failed
-              pattern1 = r"Test Case '-\[([^\]]+)\]' failed \((\d+\.\d+) seconds\)"
-              matches1 = re.finditer(pattern1, content)
-              
-              for match in matches1:
-                  test_name = match.group(1)
-                  
-                  # Find the context around this failure
-                  start_pos = max(0, match.start() - 500)
-                  end_pos = min(len(content), match.end() + 500)
-                  context = content[start_pos:end_pos]
-                  
-                  # Try to extract the failure reason
-                  reason_patterns = [
-                      r'XCTAssertEqual failed: \("([^"]+)"\) is not equal to \("([^"]+)"\)',
-                      r'XCTAssertTrue failed(.*?)(?=\n\n|\nTest Case)',
-                      r'XCTAssertFalse failed(.*?)(?=\n\n|\nTest Case)',
-                      r'XCTAssertNil failed(.*?)(?=\n\n|\nTest Case)',
-                      r'failed: (.+?)(?=\n\s*\n|\nTest Case)',
-                  ]
-                  
-                  reason = "Test failed"
-                  for pattern in reason_patterns:
-                      reason_match = re.search(pattern, context, re.DOTALL)
-                      if reason_match:
-                          if len(reason_match.groups()) > 1:
-                              reason = f'"{reason_match.group(1)}" is not equal to "{reason_match.group(2)}"'
-                          else:
-                              reason = reason_match.group(1).strip()[:200]
-                          break
-                  
-                  failures.append({
-                      'name': test_name,
-                      'reason': reason
-                  })
-              
-              # Remove duplicates
-              unique_failures = []
-              seen = set()
-              for f in failures:
-                  if f['name'] not in seen:
-                      unique_failures.append(f)
-                      seen.add(f['name'])
-              
-              with open('failed_tests.json', 'w') as f:
-                  json.dump(unique_failures, f, indent=2)
-              
-              print(f"❌ Found {len(unique_failures)} failed test(s)")
-          
-          except Exception as e:
-              print(f"⚠️ Error extracting failures: {e}")
-              with open('failed_tests.json', 'w') as f:
-                  json.dump([], f)
-          EOF
+          echo "✅ All tests completed in $((END_TIME - START_TIME)) seconds"
 
       - name: Generate Project-Wide Coverage Report
         if: always()
@@ -416,8 +339,8 @@ jobs:
             echo "SUCCESS=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Comment on PR - Tests Passed
-        if: steps.coverage.outputs.SUCCESS == 'true' && steps.run_tests.outputs.TEST_EXIT_CODE == '0'
+      - name: Comment on PR
+        if: steps.coverage.outputs.SUCCESS == 'true'
         uses: actions/github-script@v7
         with:
           script: |
@@ -430,54 +353,19 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.payload.pull_request.number,
-              body: '## ✅ Tests Passed\n\n**Test Coverage:** **' + coverage + '**\n\n**Details:**\n- 📁 Files Analyzed: ' + files + '\n- ✅ Lines Covered: ' + linesHit + '\n- 📝 Total Lines: ' + linesTotal + '\n\n*Coverage calculated after excluding files per .xcodecov.yaml configuration*'
+              body: '## 📊 Test Coverage Report\n\n**Total Coverage:** **' + coverage + '**\n\n**Details:**\n- 📁 Files Analyzed: ' + files + '\n- ✅ Lines Covered: ' + linesHit + '\n- 📝 Total Lines: ' + linesTotal + '\n\n*Coverage calculated after excluding files per .xcodecov.yaml configuration*'
             });
 
-      - name: Comment on PR - Tests Failed
-        if: steps.run_tests.outputs.TEST_EXIT_CODE != '0'
+      - name: Comment on Failure
+        if: failure()
         uses: actions/github-script@v7
         with:
           script: |
-            const fs = require('fs');
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
-            
-            let body = '## ❌ Tests Failed\n\n';
-            
-            if (fs.existsSync('failed_tests.json')) {
-              const failures = JSON.parse(fs.readFileSync('failed_tests.json', 'utf8'));
-              
-              if (failures.length > 0) {
-                body += '### Failed Tests:\n\n';
-                const displayCount = Math.min(failures.length, 10);
-                
-                for (let i = 0; i < displayCount; i++) {
-                  const test = failures[i];
-                  body += `**${i + 1}. \`${test.name}\`**\n`;
-                  body += `   → ${test.reason}\n\n`;
-                }
-                
-                if (failures.length > 10) {
-                  body += `\n_... and ${failures.length - 10} more test failure(s)_\n\n`;
-                }
-              }
-            }
-            
-            const coverage = '${{ steps.coverage.outputs.TOTAL_COVERAGE }}';
-            if (coverage && coverage !== 'N/A' && coverage !== '0.00%') {
-              body += `\n---\n**Test Coverage:** ${coverage}\n\n`;
-            }
-            
-            body += `\n[📋 View Full Logs](${runUrl})`;
             
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.payload.pull_request.number,
-              body: body
+              body: `❌ Coverage check failed. [View logs](${runUrl})`
             });
-
-      - name: Fail Workflow if Tests Failed
-        if: steps.run_tests.outputs.TEST_EXIT_CODE != '0'
-        run: |
-          echo "❌ Tests failed with exit code ${{ steps.run_tests.outputs.TEST_EXIT_CODE }}"
-          exit 1
