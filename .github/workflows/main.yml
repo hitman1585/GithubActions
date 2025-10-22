@@ -17,7 +17,7 @@ jobs:
     if: |
       contains(github.event.pull_request.labels.*.name, 'run_ci') &&
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: macos-latest
+    runs-on: macos-15
     timeout-minutes: 45
 
     steps:
@@ -28,15 +28,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup Latest Stable Xcode
-        run: |
-          if [ -d "/Applications/Xcode.app" ]; then
-            SELECTED_XCODE="Xcode.app"
-          else
-            SELECTED_XCODE=$(ls /Applications | grep "^Xcode" | grep -v -i beta | grep -v -i "RC" | grep -v -i preview | sort -V | tail -1)
-          fi
-          
-          sudo xcode-select -s /Applications/$SELECTED_XCODE/Contents/Developer
-          xcodebuild -version
+        run: sudo xcode-select -switch /Applications/Xcode_16.2.0.app && /usr/bin/xcodebuild -version
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -46,26 +38,9 @@ jobs:
       - name: Install PyYAML
         run: pip install pyyaml
 
-      - name: Find Available Simulator
-        id: simulator
-        run: |
-          RUNTIME=$(xcrun simctl list runtimes iOS -j | jq -r '.runtimes | map(select(.isAvailable == true)) | sort_by(.version) | last | .identifier')
-          DEVICE_UDID=$(xcrun simctl list devices -j | jq -r --arg runtime "$RUNTIME" '.devices[$runtime] | .[]? | select(.name | contains("iPhone")) | .udid' | head -1)
-          
-          if [ -z "$DEVICE_UDID" ]; then
-            DEVICE_TYPE=$(xcrun simctl list devicetypes -j | jq -r '.devicetypes | map(select(.name | contains("iPhone"))) | last | .identifier')
-            DEVICE_UDID=$(xcrun simctl create "CI-iPhone" "$DEVICE_TYPE" "$RUNTIME")
-          fi
-          
-          xcrun simctl boot "$DEVICE_UDID" 2>/dev/null || true
-          sleep 3
-          
-          echo "DEVICE_UDID=$DEVICE_UDID" >> $GITHUB_OUTPUT
-
       - name: Run All Module Tests
         env:
           SCHEME: "GithubActions"
-          DEVICE_UDID: ${{ steps.simulator.outputs.DEVICE_UDID }}
         run: |
           echo "🧪 Running ALL module tests..."
           echo "This includes:"
@@ -73,7 +48,7 @@ jobs:
           echo "  - HelpCentreKitImplTests"
           echo "  - LoginModuleTests"
           echo "  - MAnalyticsTests"
-          echo "  - MeeshoCommonTests"
+          echo "  - GithubActionsCommonTests"
           echo "  - And any other test targets"
           echo ""
           
@@ -84,7 +59,7 @@ jobs:
           xcodebuild test \
             -workspace GithubActions.xcworkspace \
             -scheme "$SCHEME" \
-            -destination "platform=iOS Simulator,id=$DEVICE_UDID" \
+            -destination "platform=iOS Simulator,name=iPhone 12,OS=18.2" \
             -enableCodeCoverage YES \
             -resultBundlePath TestResults.xcresult \
             -derivedDataPath DerivedData \
