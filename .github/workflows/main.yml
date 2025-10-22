@@ -176,10 +176,10 @@ jobs:
           echo "  Files: $BEFORE_FILES"
           echo "  Lines: $BEFORE_LH / $BEFORE_LF ($BEFORE_COV%)"
           
-          # Apply filtering
+          # Apply filtering with PROPER glob matching
           python3 << 'PYEOF'
           import yaml
-          import re
+          import fnmatch
           import os
           
           config_file = "ci_scripts/scripts/.xcodecov.yaml"
@@ -191,6 +191,55 @@ jobs:
           
           ignore_patterns = config.get('ignore', [])
           print(f"   Found {len(ignore_patterns)} exclusion patterns")
+          
+          def should_exclude(file_path, patterns):
+              """Check if file should be excluded based on glob patterns"""
+              # Always exclude Pods
+              if '/Pods/' in file_path or '\\Pods\\' in file_path:
+                  return True, "Pods"
+              
+              # Normalize path separators
+              normalized_path = file_path.replace('\\', '/')
+              basename = os.path.basename(normalized_path)
+              
+              for pattern in patterns:
+                  # Normalize pattern
+                  norm_pattern = pattern.replace('\\', '/')
+                  
+                  # Remove leading **/ for matching
+                  pattern_without_prefix = norm_pattern.lstrip('*').lstrip('/')
+                  
+                  # Try multiple matching strategies:
+                  
+                  # 1. Exact fnmatch on full path
+                  if fnmatch.fnmatch(normalized_path, norm_pattern):
+                      return True, pattern
+                  
+                  # 2. Check if pattern matches basename (for simple patterns like *.swift)
+                  if '/' not in pattern_without_prefix:
+                      if fnmatch.fnmatch(basename, pattern_without_prefix):
+                          return True, pattern
+                  
+                  # 3. Check if pattern is contained in path (for **/Something/**)
+                  if norm_pattern.startswith('**/') and norm_pattern.endswith('/**'):
+                      middle = norm_pattern[3:-3]  # Extract "Something" from "**/Something/**"
+                      if f'/{middle}/' in normalized_path:
+                          return True, pattern
+                  
+                  # 4. Check if pattern matches end of path (for patterns like Generated/**)
+                  if norm_pattern.endswith('/**') or norm_pattern.endswith('/*'):
+                      prefix = norm_pattern.rstrip('/*')
+                      if f'/{prefix}/' in normalized_path or normalized_path.endswith(f'/{prefix}'):
+                          return True, pattern
+                  
+                  # 5. Simple substring match for middle components
+                  if norm_pattern.startswith('**/'):
+                      pattern_suffix = norm_pattern[3:]
+                      if fnmatch.fnmatch(basename, pattern_suffix) or \
+                         any(fnmatch.fnmatch(part, pattern_suffix) for part in normalized_path.split('/')):
+                          return True, pattern
+              
+              return False, None
           
           # Read LCOV
           with open("coverage.lcov", "r") as f:
@@ -217,24 +266,8 @@ jobs:
               if not sf_line:
                   continue
               
-              # Check against all patterns
-              exclude = False
-              matched_pattern = None
-              
-              # Exclude Pods
-              if "/Pods/" in sf_line or "/Pods\\" in sf_line:
-                  exclude = True
-                  matched_pattern = "Pods"
-              
-              # Check YAML patterns
-              if not exclude:
-                  for pattern in ignore_patterns:
-                      # Convert glob to regex
-                      regex_pattern = pattern.replace('**/', '').replace('*', '.*').replace('?', '.')
-                      if re.search(regex_pattern, sf_line):
-                          exclude = True
-                          matched_pattern = pattern
-                          break
+              # Check if should be excluded
+              exclude, matched_pattern = should_exclude(sf_line, ignore_patterns)
               
               if exclude:
                   excluded_count += 1
@@ -257,6 +290,19 @@ jobs:
           sorted_patterns = sorted(excluded_by_pattern.items(), key=lambda x: len(x[1]), reverse=True)
           for pattern, files in sorted_patterns[:10]:
               print(f"   {pattern}: {len(files)} files")
+          
+          # Debug: Show some included files
+          if included_count > 0:
+              print(f"\n📁 Sample included files (first 5):")
+              sample_count = 0
+              for block in filtered_blocks[:5]:
+                  for line in block.split("\n"):
+                      if line.startswith("SF:"):
+                          print(f"   ✅ {line[3:]}")
+                          sample_count += 1
+                          break
+                  if sample_count >= 5:
+                      break
           PYEOF
           
           # Show stats AFTER filtering
