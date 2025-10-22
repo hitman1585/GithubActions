@@ -4,7 +4,7 @@
 //
 //  Created by Pankaj Singh on 11/10/23.
 //
-
+//added a comment
 import UIKit
 
 class ViewController: UIViewController {
@@ -17,6 +17,9 @@ class ViewController: UIViewController {
     static func add(a: Int, b: Int) -> Int {
         return a+b
     }
-
+    
+    static func add2(a: Int, b: Int) -> Int {
+        return a+b
+    }
 }
 
