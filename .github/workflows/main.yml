@@ -15,7 +15,6 @@ concurrency:
 jobs:
   run-tests-and-coverage:
     if: |
-      github.event.pull_request.base.ref == 'main' &&
       contains(github.event.pull_request.labels.*.name, 'run_ci') &&
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: macos-latest
@@ -86,7 +85,6 @@ jobs:
             -workspace GithubActions.xcworkspace \
             -scheme "$SCHEME" \
             -destination "platform=iOS Simulator,id=$DEVICE_UDID" \
-            -skip-testing:GithubActionsUITests \
             -enableCodeCoverage YES \
             -resultBundlePath TestResults.xcresult \
             -derivedDataPath DerivedData \
