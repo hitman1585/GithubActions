@@ -28,7 +28,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup Latest Stable Xcode
-        run: sudo xcode-select -switch /Applications/Xcode_16.2.0.app && /usr/bin/xcodebuild -version
+        run: sudo xcode-select -switch /Applications/Xcode_16.3.0.app && /usr/bin/xcodebuild -version
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -59,7 +59,7 @@ jobs:
           xcodebuild test \
             -workspace GithubActions.xcworkspace \
             -scheme "$SCHEME" \
-            -destination "platform=iOS Simulator,name=iPhone 12,OS=18.2" \
+            -destination "platform=iOS Simulator,name=iPhone 16,OS=18.4" \
             -enableCodeCoverage YES \
             -resultBundlePath TestResults.xcresult \
             -derivedDataPath DerivedData \
